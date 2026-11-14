@@ -1,4 +1,4 @@
-# 📚 現代化單機版圖書管理借還系統 (Modern Library Management System)
+# 📚 LibRust 現代化單機圖書管理系統
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache-blue.svg)](LICENSE)
@@ -66,7 +66,7 @@
 
 ### 7. ⚙️ 系統設定與舊系統無縫升級
 - **基本資料**：圖書館名稱、電話、地址、借書規則等。
-- **舊版 DBF 一鍵轉入**：若有舊版[林朝敏--簡易圖書管理系統2.*](https://blog.syps.tn.edu.tw/modules/tad_web/page.php?WebID=1&PageID=3)之 DBF 檔案（`DBF01.DBF`, `Dbf02.DBF`, `Dbf03.DBF`, `Liborrow.DBF3`等），放入 `data/` 資料夾後啟動，系統自動轉換匯入歷史藏書、讀者及在借記錄。
+- **舊版 DBF 一鍵轉入**：若有舊版[林朝敏--簡易圖書管理系統2.*](https://blog.syps.tn.edu.tw/modules/tad_web/page.php?WebID=1&PageID=3)之 DBF 檔案（`DBF01.DBF`, `Dbf02.DBF`, `Dbf03.DBF`, `Liborrow.DBF`等），放入 `/data` 資料夾後啟動，系統自動轉換匯入歷史藏書、讀者及在借記錄。
 
 ---
 
@@ -155,7 +155,7 @@ D:\antig\Library\
 > **A1：** 請先關閉系統，將程式所在資料夾內的所有檔案（主要是 `library.db` 與 `covers/` 目錄）複製到新電腦，在新電腦直接執行 `圖書管理系統.exe` 即可完整繼承所有資料。
 
 **Q2：可以多台電腦同時連線使用嗎？**
-> **A2：** 可以！但不建議，目前沒有加上認證等保護！系統啟動時監聽所有本機網卡位址。在同一區網（LAN/Wi-Fi）下的其他電腦或平板，只需在瀏覽器輸入主機的 IP 位址與連接埠（例如 `http://192.168.1.100:3000`），即可同時操作借還書。
+> **A2：** 可以！系統已具備登入身分認證與 bcrypt 加密密碼保護機制。在同一區網（LAN/Wi-Fi）下的其他電腦或平板，只需在瀏覽器輸入主機的 IP 位址與連接埠（例如 `http://192.168.1.100:3000`），登入帳號密碼後即可同時操作借還書。（初次進入預設帳號與密碼均為 `admin`，登入後可於系統設定頁變更密碼）
 
 **Q3：條碼掃描槍需要特別設定嗎？**
 > **A3：** 本系統相容市面上 99% 以上的 USB / 藍牙條碼掃描槍（模擬鍵盤輸入模式 HID）。只要掃描槍結尾帶有 Enter 鍵功能即可自動觸發借還書。

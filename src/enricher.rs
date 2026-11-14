@@ -59,10 +59,14 @@ fn sanitize_book_title(title: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub struct EnricherManager {
+    #[allow(dead_code)]
     pub progress: Arc<RwLock<EnrichmentProgress>>,
+    #[allow(dead_code)]
     pub cancel_flag: Arc<Mutex<bool>>,
     pub client: reqwest::Client,
+    #[allow(dead_code)]
     pub covers_dir: PathBuf,
 }
 
@@ -937,6 +941,7 @@ impl EnricherManager {
     }
 
     /// 啟動背景批次補齊任務（具備精確限速器與斷點續傳）
+    #[allow(dead_code)]
     pub async fn start_batch_enrichment(
         self: Arc<Self>,
         db: DbPool,
@@ -1111,6 +1116,7 @@ impl EnricherManager {
         });
     }
 
+    #[allow(dead_code)]
     pub async fn stop_batch_enrichment(&self) {
         let mut cancel = self.cancel_flag.lock().await;
         *cancel = true;

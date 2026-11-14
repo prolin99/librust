@@ -72,6 +72,19 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_loans_active ON loans(status, reader_id, book_id);
         CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
         CREATE INDEX IF NOT EXISTS idx_readers_role ON readers(role_id);
@@ -96,6 +109,19 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
         let _ = conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('library_phone', '')", []);
         let _ = conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('library_address', '')", []);
         let _ = conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('borrow_rules', '1. 請憑本證借書。\n2. 借出圖書請妥善保管，如有損毀遺失需照價賠償。\n3. 請於規定期限前歸還，若逾期將依身分別規則暫停借書權限。')", []);
+    }
+
+    // 設定預設管理員帳號 (若不存在，預設帳號 admin，密碼 admin 以 bcrypt 加密)
+    let user_count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap_or(0);
+    if user_count == 0 {
+        let default_hash = bcrypt::hash("admin", bcrypt::DEFAULT_COST).unwrap_or_else(|_| {
+            "$2b$12$e8x/kZ6qPzK3/p4fC9e9IeOqH0Y4Y9L9r7FjWqf8hV5x9k4yL".to_string()
+        });
+        let now = Local::now().to_rfc3339();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+            params!["admin", default_hash, now],
+        );
     }
 
     Ok(Arc::new(Mutex::new(conn)))
@@ -1170,6 +1196,75 @@ pub fn save_setting(db: &DbPool, key: &str, value: &str) -> std::result::Result<
     Ok(())
 }
 
+// === 帳號密碼認證與工作階段 (安全 bcrypt 加密) ===
+
+pub fn verify_user_login(db: &DbPool, username: &str, password: &str) -> std::result::Result<bool, String> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT password_hash FROM users WHERE username = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query(params![username]).map_err(|e| e.to_string())?;
+    if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let hash: String = row.get(0).map_err(|e| e.to_string())?;
+        let is_valid = bcrypt::verify(password, &hash).unwrap_or(false);
+        Ok(is_valid)
+    } else {
+        Ok(false)
+    }
+}
+
+pub fn update_user_password(db: &DbPool, username: &str, current_pwd: &str, new_pwd: &str) -> std::result::Result<(), String> {
+    if new_pwd.trim().is_empty() {
+        return Err("新密碼不可為空！".to_string());
+    }
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT password_hash FROM users WHERE username = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query(params![username]).map_err(|e| e.to_string())?;
+    if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let hash: String = row.get(0).map_err(|e| e.to_string())?;
+        if !bcrypt::verify(current_pwd, &hash).unwrap_or(false) {
+            return Err("目前密碼不正確！".to_string());
+        }
+    } else {
+        return Err("找不到該使用者帳號！".to_string());
+    }
+
+    let new_hash = bcrypt::hash(new_pwd, bcrypt::DEFAULT_COST)
+        .map_err(|e| format!("密碼加密雜湊失敗: {}", e))?;
+    conn.execute(
+        "UPDATE users SET password_hash = ?1 WHERE username = ?2",
+        params![new_hash, username],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub fn create_session(db: &DbPool, token: &str, username: &str) -> std::result::Result<(), String> {
+    let conn = db.lock().unwrap();
+    let now = Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (token, username, created_at) VALUES (?1, ?2, ?3)",
+        params![token, username, now],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn validate_session(db: &DbPool, token: &str) -> Option<String> {
+    let conn = db.lock().unwrap();
+    conn.query_row(
+        "SELECT username FROM sessions WHERE token = ?1",
+        params![token],
+        |r| r.get(0),
+    ).ok()
+}
+
+pub fn delete_session(db: &DbPool, token: &str) -> std::result::Result<(), String> {
+    let conn = db.lock().unwrap();
+    conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1277,6 +1372,48 @@ mod tests {
         assert_eq!(stats.recent_overdue_returns[0].book_id, "BTEST01");
         assert_eq!(stats.recent_overdue_returns[0].reader_id, "RTEST01");
         assert!(stats.recent_overdue_returns[0].overdue_days > 0);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_auth_default_and_password_change() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("test_auth_{}.db", fastrand::u64(..)));
+        let pool = init_db(&db_path).unwrap();
+
+        // 1. 預設帳密 admin / admin 登入成功
+        assert!(verify_user_login(&pool, "admin", "admin").unwrap());
+        // 錯誤密碼失敗
+        assert!(!verify_user_login(&pool, "admin", "wrong_pass").unwrap());
+        // 錯誤帳號失敗
+        assert!(!verify_user_login(&pool, "nonexistent", "admin").unwrap());
+
+        // 2. 驗證資料庫中密碼已加密，絕非明碼
+        {
+            let conn = pool.lock().unwrap();
+            let hash: String = conn.query_row("SELECT password_hash FROM users WHERE username = 'admin'", [], |r| r.get(0)).unwrap();
+            assert!(hash.starts_with("$2b$") || hash.starts_with("$2a$"), "密碼必須為 bcrypt 加密格式: {}", hash);
+            assert_ne!(hash, "admin", "密碼不可為明碼！");
+        }
+
+        // 3. 變更密碼：舊密碼錯誤應失敗
+        let err = update_user_password(&pool, "admin", "wrong_old", "new_admin_pass").unwrap_err();
+        assert!(err.contains("目前密碼不正確"));
+
+        // 舊密碼正確時更新成功
+        assert!(update_user_password(&pool, "admin", "admin", "new_admin_pass").is_ok());
+
+        // 4. 新密碼登入成功，舊密碼失效
+        assert!(verify_user_login(&pool, "admin", "new_admin_pass").unwrap());
+        assert!(!verify_user_login(&pool, "admin", "admin").unwrap());
+
+        // 5. 測試 Session 建立與驗證
+        let token = "test_token_123456";
+        create_session(&pool, token, "admin").unwrap();
+        assert_eq!(validate_session(&pool, token), Some("admin".to_string()));
+        delete_session(&pool, token).unwrap();
+        assert_eq!(validate_session(&pool, token), None);
 
         let _ = std::fs::remove_file(db_path);
     }

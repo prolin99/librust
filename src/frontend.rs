@@ -96,6 +96,36 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
 </head>
 <body>
 
+  <!-- 登入驗證覆蓋層 (未登入時阻擋操作) -->
+  <div id="login-overlay" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.92); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 99999;">
+    <div style="background: white; border-radius: 0.75rem; width: 100%; max-width: 420px; padding: 2.25rem 2rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border);">
+      <div style="text-align: center; margin-bottom: 1.5rem;">
+        <div style="font-size: 3rem; margin-bottom: 0.5rem;">📚</div>
+        <h2 style="font-size: 1.35rem; color: var(--text); font-weight: bold;" id="login-app-title">圖書管理借還系統</h2>
+        <p style="color: var(--text-muted); font-size: 0.88rem; margin-top: 0.25rem;">系統身分驗證，請登入後使用</p>
+      </div>
+      
+      <div id="login-error-msg" style="display: none; background: #fee2e2; color: #b91c1c; padding: 0.6rem 0.75rem; border-radius: 0.375rem; font-size: 0.85rem; margin-bottom: 1rem; border: 1px solid #f87171; font-weight: 500;"></div>
+
+      <div style="margin-bottom: 1rem;">
+        <label style="display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.35rem; color: #334155;">帳號</label>
+        <input type="text" id="login-username" value="admin" placeholder="請輸入帳號" autocomplete="username" style="font-size: 1rem; padding: 0.65rem 0.75rem;" onkeydown="if(event.key==='Enter') document.getElementById('login-password').focus()">
+      </div>
+
+      <div style="margin-bottom: 1.25rem;">
+        <label style="display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.35rem; color: #334155;">密碼</label>
+        <input type="password" id="login-password" placeholder="請輸入密碼" autocomplete="current-password" style="font-size: 1rem; padding: 0.65rem 0.75rem;" onkeydown="if(event.key==='Enter') doLogin()">
+      </div>
+
+      <button class="btn btn-primary" style="width: 100%; padding: 0.75rem; font-size: 1rem; font-weight: 600;" onclick="doLogin()">登入系統</button>
+
+      <div style="margin-top: 1.25rem; padding: 0.75rem; background: #f8fafc; border-radius: 0.375rem; font-size: 0.82rem; color: #475569; text-align: left; border: 1px dashed #cbd5e1; line-height: 1.5;">
+        💡 <strong>提示</strong>：第一次進入帳號、密碼預設均為 <code style="background: #e2e8f0; padding: 0.15rem 0.35rem; border-radius: 0.2rem; font-weight: bold; color: #1e293b;">admin</code>。<br>
+        進入系統後可至「⚙️ 系統設定」更改密碼，密碼以安全加密格式保存於資料庫中。
+      </div>
+    </div>
+  </div>
+
   <header>
     <div class="brand">
       <span class="brand-icon">📚</span>
@@ -107,11 +137,14 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <button onclick="switchTab('books')">📖 書籍管理</button>
       <button onclick="switchTab('readers')">👥 讀者名冊</button>
       <button onclick="switchTab('roles')">🏷️ 身分別設定</button>
-      <button onclick="switchTab('enrichment')">🌐 網路補齊</button>
       <button onclick="switchTab('print')">🖨️ 證卡標籤列印</button>
       <button onclick="switchTab('stats')">📊 統計儀表板</button>
       <button onclick="switchTab('settings')">⚙️ 系統設定</button>
     </nav>
+    <div id="user-info-bar" style="display: flex; align-items: center; gap: 0.75rem;">
+      <span id="current-user-display" style="font-size: 0.9rem; color: #cbd5e1; font-weight: 500;">👤 admin</span>
+      <button class="btn btn-outline btn-sm" style="color: white; border-color: #475569;" onclick="handleLogout()">🚪 登出</button>
+    </div>
   </header>
 
   <main>
@@ -444,44 +477,6 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       </div>
     </section>
 
-    <!-- 6. 網路書目補齊與防攻擊限速 -->
-    <section id="tab-enrichment" class="tab-content">
-      <div class="card">
-        <h2>🌐 網路書目與封面圖自動補齊精靈 (具防攻擊限速)</h2>
-        <p style="color: var(--text-muted); margin: 0.5rem 0 1.5rem 0;">系統會依設定之頻率在背景向 Google Books / Open Library 查詢書籍封面與簡介，絕不觸發網路阻斷防護。</p>
-        
-        <div class="grid grid-2" style="margin-bottom: 1.5rem;">
-          <div style="background: #f8fafc; padding: 1rem; border-radius: 0.375rem; border: 1px solid var(--border);">
-            <h4 style="margin-bottom: 0.75rem;">⚙️ 限速與執行策略</h4>
-            <div style="margin-bottom: 0.5rem;">
-              <label style="font-size: 0.85rem; font-weight: 600;">每分鐘連線頻率上限 (次/分)</label>
-              <input type="number" id="enrich-rpm" value="20" min="5" max="60" style="margin-top: 0.25rem;">
-              <small style="color: var(--text-muted);">建議設為 15~25 次/分，避免被判定為惡意連線。</small>
-            </div>
-            <div style="margin-top: 0.75rem;">
-              <label><input type="checkbox" id="enrich-cover" checked> 自動下載並儲存封面圖片</label><br>
-              <label><input type="checkbox" id="enrich-desc" checked> 補齊書籍內容簡介 (Description)</label>
-            </div>
-            <div style="margin-top: 1rem; display: flex; gap: 0.5rem;">
-              <button class="btn btn-primary" onclick="startEnrichment()">▶️ 啟動背景批次補齊</button>
-              <button class="btn btn-danger" onclick="stopEnrichment()">⏹️ 停止/暫停</button>
-            </div>
-          </div>
-
-          <div style="background: #f8fafc; padding: 1rem; border-radius: 0.375rem; border: 1px solid var(--border);">
-            <h4 style="margin-bottom: 0.75rem;">📊 目前補齊進度</h4>
-            <div style="background: #e2e8f0; height: 1.25rem; border-radius: 9999px; overflow: hidden; margin-bottom: 0.5rem;">
-              <div id="enrich-progress-bar" style="background: var(--primary); width: 0%; height: 100%; transition: width 0.3s;"></div>
-            </div>
-            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.5rem;">
-              <span id="enrich-progress-percent">0%</span>
-              <span id="enrich-progress-count">0 / 0</span>
-            </div>
-            <div id="enrich-status-msg" style="font-size: 0.85rem; color: var(--text-muted); background: white; padding: 0.5rem; border-radius: 0.25rem; border: 1px solid var(--border); min-height: 40px;">待命狀態</div>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <!-- 7. 證卡標籤批次列印 -->
     <section id="tab-print" class="tab-content">
@@ -615,10 +610,6 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
           <label style="font-weight: 600;">地址</label>
           <input type="text" id="set-lib-address" style="margin-top: 0.25rem;">
         </div>
-        <div style="margin-bottom: 0.75rem;">
-          <label style="font-weight: 600;">借書證背面「借閱須知規則」</label>
-          <textarea id="set-lib-rules" rows="4" style="margin-top: 0.25rem;"></textarea>
-        </div>
         <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
           <div style="flex: 1;">
             <label style="font-weight: 600;">書籍條碼貼紙寬度 (mm)</label>
@@ -633,6 +624,27 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
           <label><input type="checkbox" id="set-show-spine" checked> 列印書籍標籤時，一併列印書脊分類背標</label>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">儲存系統設定</button>
+
+        <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
+
+        <h3 style="color: var(--primary); margin-bottom: 0.5rem;">🔐 變更管理員登入密碼</h3>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+          密碼記錄經不可逆之安全雜湊（bcrypt 加密）存入資料庫，絕非明碼儲存，保障系統安全。
+        </p>
+        <div style="margin-bottom: 0.75rem;">
+          <label style="font-weight: 600;">目前密碼</label>
+          <input type="password" id="change-pwd-current" placeholder="請輸入目前密碼" style="margin-top: 0.25rem;">
+        </div>
+        <div style="margin-bottom: 0.75rem;">
+          <label style="font-weight: 600;">新密碼</label>
+          <input type="password" id="change-pwd-new" placeholder="請輸入新密碼" style="margin-top: 0.25rem;">
+        </div>
+        <div style="margin-bottom: 1rem;">
+          <label style="font-weight: 600;">確認新密碼</label>
+          <input type="password" id="change-pwd-confirm" placeholder="請再次輸入新密碼" style="margin-top: 0.25rem;">
+        </div>
+        <div id="change-pwd-msg" style="display: none; padding: 0.6rem; border-radius: 0.375rem; font-size: 0.85rem; margin-bottom: 1rem;"></div>
+        <button class="btn btn-warning" onclick="handleChangePassword()">變更密碼</button>
 
         <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
 
@@ -1953,51 +1965,6 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       if (data.success) loadRoles();
     }
 
-    // === 6. 網路補齊 ===
-    async function startEnrichment() {
-      const rpm = parseInt(document.getElementById('enrich-rpm').value) || 20;
-      const res = await fetch('/api/enrichment/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requests_per_minute: rpm,
-          max_requests_per_hour: 500,
-          jitter_ms: 1000,
-          update_cover: document.getElementById('enrich-cover').checked,
-          update_desc: document.getElementById('enrich-desc').checked,
-          update_meta: true,
-          overwrite_existing: false,
-        })
-      });
-      const data = await res.json();
-      alert(data.message);
-      if (data.success) pollEnrichment();
-    }
-
-    async function stopEnrichment() {
-      const res = await fetch('/api/enrichment/stop', { method: 'POST' });
-      const data = await res.json();
-      alert(data.message);
-    }
-
-    function pollEnrichment() {
-      if (enrichInterval) clearInterval(enrichInterval);
-      enrichInterval = setInterval(async () => {
-        const res = await fetch('/api/enrichment/progress');
-        const data = await res.json();
-        if (data.success && data.data) {
-          const p = data.data;
-          const pct = p.total > 0 ? Math.round((p.processed / p.total) * 100) : 0;
-          document.getElementById('enrich-progress-bar').style.width = pct + '%';
-          document.getElementById('enrich-progress-percent').textContent = pct + '%';
-          document.getElementById('enrich-progress-count').textContent = `${p.processed} / ${p.total}`;
-          document.getElementById('enrich-status-msg').textContent = p.last_message || '執行中...';
-          if (!p.is_running && p.total > 0 && p.processed >= p.total) {
-            clearInterval(enrichInterval);
-          }
-        }
-      }, 1500);
-    }
 
     // === 7. 批次列印 (借書證 & 書籍標籤) ===
     // 內建純 SVG 條碼產生器 (Code 39)
@@ -2256,7 +2223,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       }
     }
 
-    // === 9. 系統設定 ===
+    // === 9. 系統設定與密碼變更 ===
     async function loadSettings() {
       const res = await fetch('/api/settings');
       const data = await res.json();
@@ -2264,9 +2231,13 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         const s = data.data;
         document.getElementById('set-lib-name').value = s.library_name;
         document.getElementById('header-library-name').textContent = s.library_name;
+        const loginTitle = document.getElementById('login-app-title');
+        if (loginTitle) loginTitle.textContent = s.library_name;
         document.getElementById('set-lib-phone').value = s.library_phone;
         document.getElementById('set-lib-address').value = s.library_address;
-        document.getElementById('set-lib-rules').value = s.borrow_rules;
+        if (document.getElementById('set-lib-rules')) {
+          document.getElementById('set-lib-rules').value = s.borrow_rules || '';
+        }
         document.getElementById('set-barcode-w').value = s.barcode_width_mm;
         document.getElementById('set-barcode-h').value = s.barcode_height_mm;
         document.getElementById('set-show-spine').checked = s.show_spine_tag;
@@ -2278,7 +2249,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         library_name: document.getElementById('set-lib-name').value.trim(),
         library_phone: document.getElementById('set-lib-phone').value.trim(),
         library_address: document.getElementById('set-lib-address').value.trim(),
-        borrow_rules: document.getElementById('set-lib-rules').value.trim(),
+        borrow_rules: document.getElementById('set-lib-rules') ? document.getElementById('set-lib-rules').value.trim() : '',
         barcode_width_mm: parseFloat(document.getElementById('set-barcode-w').value) || 48,
         barcode_height_mm: parseFloat(document.getElementById('set-barcode-h').value) || 40,
         show_spine_tag: document.getElementById('set-show-spine').checked,
@@ -2295,7 +2266,60 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       alert(data.message);
       if (data.success) {
         document.getElementById('header-library-name').textContent = settings.library_name;
+        const loginTitle = document.getElementById('login-app-title');
+        if (loginTitle) loginTitle.textContent = settings.library_name;
       }
+    }
+
+    async function handleChangePassword() {
+      const current_password = document.getElementById('change-pwd-current').value;
+      const new_password = document.getElementById('change-pwd-new').value;
+      const confirm_password = document.getElementById('change-pwd-confirm').value;
+
+      if (!current_password) {
+        showPwdMsg('請輸入目前密碼！', true);
+        return;
+      }
+      if (!new_password) {
+        showPwdMsg('請輸入新密碼！', true);
+        return;
+      }
+      if (new_password !== confirm_password) {
+        showPwdMsg('新密碼與確認密碼不一致！', true);
+        return;
+      }
+      if (new_password.length < 3) {
+        showPwdMsg('新密碼長度建議至少3個字元！', true);
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ current_password, new_password })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showPwdMsg(data.message || '密碼已成功更新！', false);
+          document.getElementById('change-pwd-current').value = '';
+          document.getElementById('change-pwd-new').value = '';
+          document.getElementById('change-pwd-confirm').value = '';
+        } else {
+          showPwdMsg(data.message || '更新失敗！', true);
+        }
+      } catch (err) {
+        showPwdMsg('連線伺服器失敗: ' + err.message, true);
+      }
+    }
+
+    function showPwdMsg(msg, isError) {
+      const msgEl = document.getElementById('change-pwd-msg');
+      msgEl.style.display = 'block';
+      msgEl.style.background = isError ? '#fee2e2' : '#dcfce7';
+      msgEl.style.color = isError ? '#b91c1c' : '#15803d';
+      msgEl.style.border = isError ? '1px solid #f87171' : '1px solid #86efac';
+      msgEl.textContent = msg;
     }
 
     async function triggerLegacyImport() {
@@ -2306,11 +2330,85 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       loadStats();
     }
 
-    // 初始化載入
-    window.addEventListener('DOMContentLoaded', () => {
+    // === 登入與身分認證控制 ===
+    async function checkAuthStatus() {
+      try {
+        const res = await fetch('/api/auth/status');
+        const data = await res.json();
+        if (data.success && data.data && data.data.logged_in) {
+          setLoggedInState(data.data.username || 'admin');
+          return true;
+        }
+      } catch (e) {
+        console.error('Check auth status error:', e);
+      }
+      setLoggedOutState();
+      return false;
+    }
+
+    function setLoggedInState(username) {
+      document.getElementById('login-overlay').style.display = 'none';
+      document.getElementById('current-user-display').textContent = '👤 ' + username;
+      document.getElementById('user-info-bar').style.display = 'flex';
       loadSettings();
       loadRoles();
       document.getElementById('borrow-reader-id').focus();
+    }
+
+    function setLoggedOutState() {
+      document.getElementById('login-overlay').style.display = 'flex';
+      document.getElementById('user-info-bar').style.display = 'none';
+      document.getElementById('login-password').value = '';
+      const errEl = document.getElementById('login-error-msg');
+      if (errEl) errEl.style.display = 'none';
+      setTimeout(() => {
+        const pwdInput = document.getElementById('login-password');
+        if (pwdInput) pwdInput.focus();
+      }, 100);
+    }
+
+    async function doLogin() {
+      const username = document.getElementById('login-username').value.trim();
+      const password = document.getElementById('login-password').value;
+      const errEl = document.getElementById('login-error-msg');
+      errEl.style.display = 'none';
+
+      if (!username || !password) {
+        errEl.textContent = '請輸入帳號與密碼！';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (data.success && data.data) {
+          setLoggedInState(data.data.username);
+        } else {
+          errEl.textContent = data.message || '帳號或密碼錯誤！';
+          errEl.style.display = 'block';
+        }
+      } catch (err) {
+        errEl.textContent = '連線伺服器失敗: ' + err.message;
+        errEl.style.display = 'block';
+      }
+    }
+
+    async function handleLogout() {
+      if (!confirm('確定要登出系統嗎？')) return;
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (e) {}
+      setLoggedOutState();
+    }
+
+    // 初始化載入
+    window.addEventListener('DOMContentLoaded', () => {
+      checkAuthStatus();
     });
   </script>
 </body>

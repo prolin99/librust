@@ -136,6 +136,7 @@ pub struct RenewRequest {
     pub loan_id: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
     pub requests_per_minute: u32,

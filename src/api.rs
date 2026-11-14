@@ -38,6 +38,7 @@ pub struct SystemSettings {
     pub library_name: String,
     pub library_phone: String,
     pub library_address: String,
+    #[serde(default)]
     pub borrow_rules: String,
     pub barcode_width_mm: f64,
     pub barcode_height_mm: f64,
@@ -47,8 +48,37 @@ pub struct SystemSettings {
     pub jitter_ms: u64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub username: String,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthStatus {
+    pub logged_in: bool,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
 pub fn create_router(state: AppState) -> Router {
     Router::new()
+        // 登入認證
+        .route("/api/auth/login", post(handle_login))
+        .route("/api/auth/logout", post(handle_logout))
+        .route("/api/auth/status", get(handle_auth_status))
+        .route("/api/auth/change-password", post(handle_change_password))
         // 角色身分別
         .route("/api/roles", get(list_roles).post(create_or_update_role))
         .route("/api/roles/:id", delete(remove_role))
@@ -78,10 +108,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/import/readers", post(handle_import_readers))
         .route("/api/templates/books.csv", get(download_books_template))
         .route("/api/templates/readers.csv", get(download_readers_template))
-        // 網路書目補齊與限速器
-        .route("/api/enrichment/start", post(start_enrichment))
-        .route("/api/enrichment/stop", post(stop_enrichment))
-        .route("/api/enrichment/progress", get(get_enrichment_progress))
         // 封面圖片靜態路由
         .route("/covers/:filename", get(serve_cover_image))
         .with_state(state)
@@ -514,26 +540,106 @@ async fn download_readers_template() -> impl IntoResponse {
     )
 }
 
-// === 補齊任務控制 ===
+// === 認證與工作階段控制 ===
 
-async fn start_enrichment(
-    State(state): State<AppState>,
-    Json(config): Json<RateLimitConfig>,
-) -> Json<ApiResponse<String>> {
-    state.enricher.clone().start_batch_enrichment(state.db.clone(), config).await;
-    Json(ApiResponse::ok("批次補齊任務已啟動！", "啟動成功".to_string()))
+fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(val) = headers.get("x-auth-token").and_then(|v| v.to_str().ok()) {
+        if !val.trim().is_empty() {
+            return Some(val.trim().to_string());
+        }
+    }
+    if let Some(val) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        if let Some(tok) = val.strip_prefix("Bearer ") {
+            if !tok.trim().is_empty() {
+                return Some(tok.trim().to_string());
+            }
+        }
+    }
+    if let Some(cookie_str) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        for part in cookie_str.split(';') {
+            let part = part.trim();
+            if let Some(tok) = part.strip_prefix("auth_token=") {
+                return Some(tok.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
-async fn stop_enrichment(State(state): State<AppState>) -> Json<ApiResponse<String>> {
-    state.enricher.stop_batch_enrichment().await;
-    Json(ApiResponse::ok("已送出停止請求", "已請求停止".to_string()))
+async fn handle_login(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginRequest>,
+) -> impl IntoResponse {
+    match verify_user_login(&state.db, &payload.username, &payload.password) {
+        Ok(true) => {
+            let token = format!("{:x}{:x}", fastrand::u128(..), fastrand::u128(..));
+            let _ = create_session(&state.db, &token, &payload.username);
+            let cookie_val = format!("auth_token={}; Path=/; HttpOnly; SameSite=Lax", token);
+            (
+                StatusCode::OK,
+                [(header::SET_COOKIE, cookie_val)],
+                Json(ApiResponse::ok("登入成功！", Some(AuthResponse {
+                    username: payload.username,
+                    token,
+                }))),
+            ).into_response()
+        }
+        _ => {
+            (
+                StatusCode::OK,
+                [(header::SET_COOKIE, "".to_string())],
+                Json(ApiResponse::<Option<AuthResponse>>::err("帳號或密碼錯誤！")),
+            ).into_response()
+        }
+    }
 }
 
-async fn get_enrichment_progress(
+async fn handle_logout(
     State(state): State<AppState>,
-) -> Json<ApiResponse<EnrichmentProgress>> {
-    let p = state.enricher.progress.read().await.clone();
-    Json(ApiResponse::ok("獲取成功", p))
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if let Some(token) = extract_token(&headers) {
+        let _ = delete_session(&state.db, &token);
+    }
+    let cookie_val = "auth_token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".to_string();
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie_val)],
+        Json(ApiResponse::ok("已登出！", ())),
+    )
+}
+
+async fn handle_auth_status(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<ApiResponse<AuthStatus>> {
+    if let Some(token) = extract_token(&headers) {
+        if let Some(username) = validate_session(&state.db, &token) {
+            return Json(ApiResponse::ok("已登入", AuthStatus {
+                logged_in: true,
+                username: Some(username),
+            }));
+        }
+    }
+    Json(ApiResponse::ok("未登入", AuthStatus {
+        logged_in: false,
+        username: None,
+    }))
+}
+
+async fn handle_change_password(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Json<ApiResponse<()>> {
+    let username = extract_token(&headers)
+        .and_then(|tok| validate_session(&state.db, &tok))
+        .unwrap_or_else(|| "admin".to_string());
+
+    match update_user_password(&state.db, &username, &payload.current_password, &payload.new_password) {
+        Ok(_) => Json(ApiResponse::ok("密碼更新成功！已安全加密儲存於資料庫。", ())),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
 }
 
 // === 系統設定 ===
