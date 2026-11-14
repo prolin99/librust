@@ -66,7 +66,7 @@
 
 ### 7. ⚙️ 系統設定與舊系統無縫升級
 - **基本資料**：圖書館名稱、電話、地址、借書規則等。
-- **舊版 DBF 一鍵轉入**：若有舊版圖書館系統之 DBF 檔案（`DBF01.DBF`, `Dbf02.DBF`, `Dbf03.DBF`），放入 `data/` 資料夾後啟動，系統自動轉換匯入歷史藏書、讀者及在借記錄。
+- **舊版 DBF 一鍵轉入**：若有舊版[林朝敏--簡易圖書管理系統2.*]([https://rustup.rs/](https://blog.syps.tn.edu.tw/modules/tad_web/page.php?WebID=1&PageID=3))之 DBF 檔案（`DBF01.DBF`, `Dbf02.DBF`, `Dbf03.DBF`, `Liborrow.DBF3`等），放入 `data/` 資料夾後啟動，系統自動轉換匯入歷史藏書、讀者及在借記錄。
 
 ---
 
@@ -105,8 +105,7 @@
 #### 2. 複製專案與編譯
 ```powershell
 # 1. 複製專案
-git clone https://github.com/your-repo/library_system.git
-cd library_system
+
 
 # 2. 執行單元測試以確保邏輯無誤
 cargo test
