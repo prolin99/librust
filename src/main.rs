@@ -65,10 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(create_router(state))
         .layer(CorsLayer::permissive());
 
-    // 6. 尋找可用連接埠並啟動伺服器
+    // 6. 尋找可用連接埠並啟動伺服器（綁定 0.0.0.0 支援本機與區網 IP 存取）
     let mut port = 3000;
     let listener = loop {
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("0.0.0.0:{}", port);
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => break l,
             Err(_) => {
@@ -80,9 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let url = format!("http://127.0.0.1:{}", port);
-    println!("\n[✔] 圖書管理系統已啟動成功！");
-    println!("👉 請於瀏覽器開啟: {}", url);
+    let url = format!("http://localhost:{}", port);
+    println!("\n[✔] 圖書管理系統已啟動成功 (v0.4)！");
+    println!("👉 本機連線請於瀏覽器開啟: {}", url);
+    println!("👉 區網其他裝置請連線: http://<本機IP>:{}", port);
     println!("👉 自動為您開啟預設瀏覽器中...");
     println!("--------------------------------------------------------");
     println!("提示：此系統為單機獨立運作，所有書籍與借還資料均儲存在本地 library.db");

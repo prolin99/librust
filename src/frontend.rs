@@ -486,7 +486,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
           <div style="display: flex; gap: 0.5rem;">
             <button class="btn btn-outline" onclick="previewBatchCards()">🪪 預覽借書證</button>
             <button class="btn btn-outline" onclick="previewBatchBarcodes()">🏷️ 預覽書籍標籤</button>
-            <button class="btn btn-primary" onclick="window.print()">🖨️ 直接列印</button>
+            <button class="btn btn-primary" onclick="doDirectPrint()">🖨️ 直接列印</button>
           </div>
         </div>
 
@@ -496,19 +496,19 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; align-items: flex-end;">
             <div>
               <label style="font-size: 0.8rem; color: var(--text-muted);">起始編號 (條碼/證號)：</label>
-              <input type="text" id="print-range-start" placeholder="例：B000001 或 00001" style="margin-top: 0.25rem;">
+              <input type="text" id="print-range-start" placeholder="例：B000001 或 00001" style="margin-top: 0.25rem;" oninput="onPrintOptionDebounced()">
             </div>
             <div>
               <label style="font-size: 0.8rem; color: var(--text-muted);">結束編號 (條碼/證號)：</label>
-              <input type="text" id="print-range-end" placeholder="例：B000050 或 00050" style="margin-top: 0.25rem;">
+              <input type="text" id="print-range-end" placeholder="例：B000050 或 00050" style="margin-top: 0.25rem;" oninput="onPrintOptionDebounced()">
             </div>
             <div>
               <label style="font-size: 0.8rem; color: var(--text-muted);">關鍵字 / 分類 / 身分篩選：</label>
-              <input type="text" id="print-range-filter" placeholder="如書名、作者、班級..." style="margin-top: 0.25rem;">
+              <input type="text" id="print-range-filter" placeholder="如書名、作者、班級..." style="margin-top: 0.25rem;" oninput="onPrintOptionDebounced()">
             </div>
             <div>
               <label style="font-size: 0.8rem; color: var(--text-muted);">最多筆數限制：</label>
-              <select id="print-range-limit" style="margin-top: 0.25rem;">
+              <select id="print-range-limit" style="margin-top: 0.25rem;" onchange="triggerInstantPreview()">
                 <option value="0">全部符合項目</option>
                 <option value="20">前 20 筆</option>
                 <option value="50" selected>前 50 筆</option>
@@ -518,13 +518,30 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
             </div>
             <div style="display: flex; align-items: center; padding-bottom: 0.5rem;">
               <label style="font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; color: #1e293b;">
-                <input type="checkbox" id="print-opt-spine" checked style="width: 1rem; height: 1rem; cursor: pointer;"> 書籍標籤包含背標
+                <input type="checkbox" id="print-opt-spine" checked style="width: 1rem; height: 1rem; cursor: pointer;" onchange="onSpineCheckboxChange()"> 書籍標籤包含背標
               </label>
             </div>
           </div>
-          <div id="print-status-bar" style="margin-top: 0.75rem; font-size: 0.85rem; color: #475569; display: flex; justify-content: space-between;">
+          <div id="print-status-bar" style="margin-top: 0.75rem; font-size: 0.85rem; color: #475569; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
             <span>💡 提示：設定起訖編號後，點選上方「預覽借書證」或「預覽書籍標籤」即可套用篩選。</span>
             <span id="print-count-label" style="font-weight: 600;"></span>
+          </div>
+
+          <!-- 條碼貼紙 / 證卡尺寸設定與即時預覽 -->
+          <div style="margin-top: 0.85rem; padding-top: 0.85rem; border-top: 1px dashed #cbd5e1; display: flex; align-items: center; flex-wrap: wrap; gap: 0.85rem;">
+            <div id="print-dim-title" style="font-weight: 600; font-size: 0.85rem; color: #334155;">
+              📏 列印尺寸設定：
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.4rem;">
+              <label style="font-size: 0.82rem; color: var(--text-muted); font-weight: 600; white-space: nowrap;">寬度 (mm)：</label>
+              <input type="number" id="set-barcode-w" value="48" style="width: 80px; margin: 0; padding: 0.35rem 0.5rem;" oninput="onBarcodeDimensionChange()" onchange="onBarcodeDimensionChange()">
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.4rem;">
+              <label style="font-size: 0.82rem; color: var(--text-muted); font-weight: 600; white-space: nowrap;">高度 (mm)：</label>
+              <input type="number" id="set-barcode-h" value="40" style="width: 80px; margin: 0; padding: 0.35rem 0.5rem;" oninput="onBarcodeDimensionChange()" onchange="onBarcodeDimensionChange()">
+            </div>
+            <button type="button" class="btn btn-outline" style="padding: 0.3rem 0.75rem; font-size: 0.82rem;" onclick="triggerInstantPreview()">🔄 立即更新預覽</button>
+            <div id="barcode-dim-reminder" style="display: none; padding: 0.35rem 0.75rem; border-radius: 0.375rem; font-size: 0.82rem; font-weight: 600;"></div>
           </div>
         </div>
 
@@ -597,7 +614,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
     <!-- 9. 系統設定 -->
     <section id="tab-settings" class="tab-content">
       <div class="card" style="max-width: 700px;">
-        <h2 style="margin-bottom: 1rem;">⚙️ 圖書館基本資料與標籤設定</h2>
+        <h2 style="margin-bottom: 1rem;">⚙️ 圖書館基本資料設定</h2>
         <div style="margin-bottom: 0.75rem;">
           <label style="font-weight: 600;">學校 / 機構名稱 (印在借書證與書標籤)</label>
           <input type="text" id="set-lib-name" style="margin-top: 0.25rem;">
@@ -610,18 +627,8 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
           <label style="font-weight: 600;">地址</label>
           <input type="text" id="set-lib-address" style="margin-top: 0.25rem;">
         </div>
-        <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
-          <div style="flex: 1;">
-            <label style="font-weight: 600;">書籍條碼貼紙寬度 (mm)</label>
-            <input type="number" id="set-barcode-w" value="48" style="margin-top: 0.25rem;">
-          </div>
-          <div style="flex: 1;">
-            <label style="font-weight: 600;">貼紙高度 (mm)</label>
-            <input type="number" id="set-barcode-h" value="40" style="margin-top: 0.25rem;">
-          </div>
-        </div>
         <div style="margin-bottom: 1.5rem;">
-          <label><input type="checkbox" id="set-show-spine" checked> 列印書籍標籤時，一併列印書脊分類背標</label>
+          <label><input type="checkbox" id="set-show-spine" checked> 列印書籍標籤時，預設包含書脊分類背標</label>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">儲存系統設定</button>
 
@@ -663,12 +670,25 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本編號：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.3 版</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.4</code></span>
         <span style="color: #475569;">|</span>
-        <span>編譯日期：<span style="color: #cbd5e1;">2026-11-14</span></span>
+        <a href="https://github.com/prolin99/librust/" target="_blank" rel="noopener noreferrer" title="前往 GitHub 專案庫" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
+          <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
       </div>
-      <div>
-        <span>製作者：<a href="mailto:prolin99@gmail.com" style="color: #60a5fa; text-decoration: none; font-weight: 500;">prolin99@gmail.com</a> 使用 AI 撰寫 Rust 單機版圖書管理系統</span>
+      <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+        <span>製作者：</span>
+        <a href="mailto:prolin99@gmail.com" title="寄信聯絡作者" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #60a5fa; text-decoration: none; font-weight: 500;">
+          <svg height="15" width="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline-block; vertical-align: middle;">
+            <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+            <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path>
+          </svg>
+          <span>prolin99@gmail.com</span>
+        </a>
+        <span>使用 AI 撰寫 Rust 單機版圖書管理系統</span>
       </div>
     </div>
   </footer>
@@ -2050,16 +2070,36 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       return filtered;
     }
 
-    async function previewBatchCards() {
+    let currentPrintType = 'barcodes'; // 'barcodes' 或 'cards'
+    let cachedBarcodeWidth = 48;
+    let cachedBarcodeHeight = 40;
+    let cachedCardWidth = 86;
+    let cachedCardHeight = 54;
+    let resizeTimer = null;
+
+    async function previewBatchCards(switchInputs = true) {
+      currentPrintType = 'cards';
+      const dimTitle = document.getElementById('print-dim-title');
+      if (dimTitle) dimTitle.textContent = '📏 借書證尺寸設定：';
+
+      if (switchInputs) {
+        document.getElementById('set-barcode-w').value = cachedCardWidth;
+        document.getElementById('set-barcode-h').value = cachedCardHeight;
+      }
+      const wMm = parseFloat(document.getElementById('set-barcode-w')?.value) || cachedCardWidth;
+      const hMm = parseFloat(document.getElementById('set-barcode-h')?.value) || cachedCardHeight;
+      cachedCardWidth = wMm;
+      cachedCardHeight = hMm;
+
       const res = await fetch('/api/readers');
       const data = await res.json();
       const settingsRes = await fetch('/api/settings');
       const sData = await settingsRes.json();
-      const s = sData.data;
+      const s = sData.data || {};
 
       const readers = filterPrintItems(data.data || [], 'id', ['name', 'class_name', 'role_name']);
       const countLabel = document.getElementById('print-count-label');
-      if (countLabel) countLabel.textContent = `📋 預覽借書證：共 ${readers.length} 筆符合`;
+      if (countLabel) countLabel.textContent = `📋 預覽借書證：共 ${readers.length} 筆符合 (${wMm}×${hMm} mm)`;
 
       const area = document.getElementById('print-area');
       area.innerHTML = '';
@@ -2073,7 +2113,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
 
       readers.forEach(r => {
         html += `
-          <div class="print-tag-item" style="width: 86mm; height: 54mm; min-width: 86mm; min-height: 54mm; max-width: 86mm; max-height: 54mm; border: 1px solid #000; border-radius: 4px; padding: 3mm; background: white; page-break-inside: avoid; display: flex; flex-direction: column; justify-content: space-between; box-sizing: border-box; overflow: hidden;">
+          <div class="print-tag-item" style="width: ${wMm}mm; height: ${hMm}mm; min-width: ${wMm}mm; min-height: ${hMm}mm; max-width: ${wMm}mm; max-height: ${hMm}mm; border: 1px solid #000; border-radius: 4px; padding: 3mm; background: white; page-break-inside: avoid; display: flex; flex-direction: column; justify-content: space-between; box-sizing: border-box; overflow: hidden;">
             <div style="font-size: 0.85rem; font-weight: bold; text-align: center; border-bottom: 1px solid #ccc; padding-bottom: 1.5mm; margin-bottom: 1.5mm; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
               ${escapeHtml(s.library_name || '圖書管理中心')} 借書證
             </div>
@@ -2097,16 +2137,37 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       area.innerHTML = html;
     }
 
-    async function previewBatchBarcodes() {
-      const res = await fetch('/api/books');
-      const data = await res.json();
+    async function previewBatchBarcodes(switchInputs = true) {
+      currentPrintType = 'barcodes';
+      const dimTitle = document.getElementById('print-dim-title');
+      if (dimTitle) dimTitle.textContent = '📏 書籍標籤尺寸設定：';
+
       const settingsRes = await fetch('/api/settings');
       const sData = await settingsRes.json();
-      const s = sData.data;
+      const s = sData.data || {};
+
+      if (s.barcode_width_mm && switchInputs && cachedBarcodeWidth === 48) {
+        cachedBarcodeWidth = s.barcode_width_mm;
+      }
+      if (s.barcode_height_mm && switchInputs && cachedBarcodeHeight === 40) {
+        cachedBarcodeHeight = s.barcode_height_mm;
+      }
+
+      if (switchInputs) {
+        document.getElementById('set-barcode-w').value = cachedBarcodeWidth;
+        document.getElementById('set-barcode-h').value = cachedBarcodeHeight;
+      }
+      const wMm = parseFloat(document.getElementById('set-barcode-w')?.value) || cachedBarcodeWidth;
+      const hMm = parseFloat(document.getElementById('set-barcode-h')?.value) || cachedBarcodeHeight;
+      cachedBarcodeWidth = wMm;
+      cachedBarcodeHeight = hMm;
+
+      const res = await fetch('/api/books');
+      const data = await res.json();
 
       const books = filterPrintItems(data.data || [], 'id', ['title', 'author', 'category', 'location']);
       const countLabel = document.getElementById('print-count-label');
-      if (countLabel) countLabel.textContent = `🏷️ 預覽書籍標籤：共 ${books.length} 筆符合`;
+      if (countLabel) countLabel.textContent = `🏷️ 預覽書籍標籤：共 ${books.length} 筆符合 (${wMm}×${hMm} mm)`;
 
       const area = document.getElementById('print-area');
       area.innerHTML = '';
@@ -2115,11 +2176,19 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         return;
       }
 
-      // 精確套用使用者設定之標籤貼紙寬度與高度 (mm)
-      const wMm = parseFloat(s.barcode_width_mm) || 48;
-      const hMm = parseFloat(s.barcode_height_mm) || 40;
+      // 背景自動保存最新貼紙尺寸至 settings
+      if (s && (!isNaN(wMm) || !isNaN(hMm))) {
+        s.barcode_width_mm = wMm;
+        s.barcode_height_mm = hMm;
+        fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(s)
+        }).catch(err => console.error(err));
+      }
+
       // 依高度動態調整條碼圖形高度
-      const bcHeight = Math.max(16, Math.min(32, Math.round(hMm * 0.42)));
+      const bcHeight = Math.max(14, Math.min(36, Math.round(hMm * 0.42)));
 
       // 檢查是否勾選列印背標
       const optSpine = document.getElementById('print-opt-spine');
@@ -2154,6 +2223,101 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       });
       html += `</div>`;
       area.innerHTML = html;
+    }
+
+    // 即時動態修改尺寸（0毫秒延遲更新畫面上元素，並防抖重新排版）
+    function onBarcodeDimensionChange() {
+      const w = parseFloat(document.getElementById('set-barcode-w')?.value);
+      const h = parseFloat(document.getElementById('set-barcode-h')?.value);
+      if (isNaN(w) || isNaN(h) || w <= 0 || h <= 0) return;
+
+      if (currentPrintType === 'cards') {
+        cachedCardWidth = w;
+        cachedCardHeight = h;
+      } else {
+        cachedBarcodeWidth = w;
+        cachedBarcodeHeight = h;
+      }
+
+      // 1. 立即更新畫面上既有 .print-tag-item 樣式
+      const items = document.querySelectorAll('.print-tag-item');
+      items.forEach(el => {
+        el.style.width = w + 'mm';
+        el.style.minWidth = w + 'mm';
+        el.style.maxWidth = w + 'mm';
+        el.style.height = h + 'mm';
+        el.style.minHeight = h + 'mm';
+        el.style.maxHeight = h + 'mm';
+      });
+
+      // 2. 顯示綠色即時更新標籤
+      const reminder = document.getElementById('barcode-dim-reminder');
+      if (reminder) {
+        reminder.style.display = 'inline-flex';
+        reminder.style.background = '#f0fdf4';
+        reminder.style.border = '1px solid #86efac';
+        reminder.style.color = '#15803d';
+        reminder.innerHTML = `✔ 已即時更新尺寸：<strong>${w} × ${h} mm</strong>`;
+      }
+
+      // 3. 防抖 300ms 重新精確排版
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        triggerInstantPreview();
+      }, 300);
+    }
+
+    function triggerInstantPreview() {
+      if (currentPrintType === 'cards') {
+        previewBatchCards(false);
+      } else {
+        previewBatchBarcodes(false);
+      }
+    }
+
+    function onSpineCheckboxChange() {
+      // 1. 勾選/取消立即重新排版渲染預覽
+      triggerInstantPreview();
+
+      // 2. 背景同步更新至設定中的 show_spine_tag
+      const optSpine = document.getElementById('print-opt-spine');
+      if (optSpine) {
+        fetch('/api/settings').then(r => r.json()).then(sData => {
+          if (sData.success && sData.data) {
+            const s = sData.data;
+            s.show_spine_tag = optSpine.checked;
+            fetch('/api/settings', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(s)
+            }).catch(e => console.error(e));
+          }
+        }).catch(e => console.error(e));
+      }
+    }
+
+    let printFilterTimer = null;
+    function onPrintOptionDebounced() {
+      clearTimeout(printFilterTimer);
+      printFilterTimer = setTimeout(() => {
+        triggerInstantPreview();
+      }, 350);
+    }
+
+    function doDirectPrint() {
+      const w = parseFloat(document.getElementById('set-barcode-w')?.value);
+      const h = parseFloat(document.getElementById('set-barcode-h')?.value);
+      if (!isNaN(w) && !isNaN(h) && w > 0 && h > 0) {
+        document.querySelectorAll('.print-tag-item').forEach(el => {
+          el.style.width = w + 'mm';
+          el.style.minWidth = w + 'mm';
+          el.style.maxWidth = w + 'mm';
+          el.style.height = h + 'mm';
+          el.style.minHeight = h + 'mm';
+          el.style.maxHeight = h + 'mm';
+        });
+      }
+      window.print();
     }
 
     // === 8. 統計儀表板 ===
@@ -2238,9 +2402,17 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         if (document.getElementById('set-lib-rules')) {
           document.getElementById('set-lib-rules').value = s.borrow_rules || '';
         }
-        document.getElementById('set-barcode-w').value = s.barcode_width_mm;
-        document.getElementById('set-barcode-h').value = s.barcode_height_mm;
-        document.getElementById('set-show-spine').checked = s.show_spine_tag;
+        if (s.barcode_width_mm) cachedBarcodeWidth = s.barcode_width_mm;
+        if (s.barcode_height_mm) cachedBarcodeHeight = s.barcode_height_mm;
+        if (document.getElementById('set-barcode-w') && currentPrintType === 'barcodes') {
+          document.getElementById('set-barcode-w').value = cachedBarcodeWidth;
+        }
+        if (document.getElementById('set-barcode-h') && currentPrintType === 'barcodes') {
+          document.getElementById('set-barcode-h').value = cachedBarcodeHeight;
+        }
+        if (document.getElementById('set-show-spine')) {
+          document.getElementById('set-show-spine').checked = s.show_spine_tag;
+        }
       }
     }
 
@@ -2250,9 +2422,9 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         library_phone: document.getElementById('set-lib-phone').value.trim(),
         library_address: document.getElementById('set-lib-address').value.trim(),
         borrow_rules: document.getElementById('set-lib-rules') ? document.getElementById('set-lib-rules').value.trim() : '',
-        barcode_width_mm: parseFloat(document.getElementById('set-barcode-w').value) || 48,
-        barcode_height_mm: parseFloat(document.getElementById('set-barcode-h').value) || 40,
-        show_spine_tag: document.getElementById('set-show-spine').checked,
+        barcode_width_mm: parseFloat(document.getElementById('set-barcode-w')?.value) || 48,
+        barcode_height_mm: parseFloat(document.getElementById('set-barcode-h')?.value) || 40,
+        show_spine_tag: document.getElementById('set-show-spine') ? document.getElementById('set-show-spine').checked : true,
         card_margin_mm: 5,
         requests_per_minute: 20,
         jitter_ms: 1000,

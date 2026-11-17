@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20(x64)-brightgreen.svg)]()
-[![Version](https://img.shields.io/badge/version-0.3%20版-blueviolet.svg)]()
+[![Version](https://img.shields.io/badge/version-0.4%20版-blueviolet.svg)]()
 
 一套為中小學校、圖書館、研究室、基金會及私人藏書量身打造的**高效能單機版圖書管理系統**。全程式以 **Rust** 語言深度開發，封裝為**單一綠色免安裝執行檔 (`圖書管理系統.exe`)**，體積僅約 8 MB。無需安裝 Python、Node.js、IIS、SQL Server 等任何複雜環境，開箱雙擊即用！
 
@@ -164,7 +164,8 @@ D:\antig\Library\
 
 ## 👨‍💻 作者與版權聲明
 
-- **版本編號**：v0.3.0 (0.3 版)
+- **版本編號**：v0.4.0 (0.4 版)
+- **下載連結**：https://github.com/prolin99/librust/
 - **製作者**：prolin99@gmail.com
 - **開發說明**：使用 AI 協作輔助撰寫之 Rust 高效能單機版圖書管理系統
 - **授權協議**：[MIT License](LICENSE)
