@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod models;
 mod legacy;
 mod db;
@@ -81,16 +83,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let url = format!("http://localhost:{}", port);
-    println!("\n[✔] 圖書管理系統已啟動成功 (v0.4)！");
+    println!("\n[✔] 圖書管理系統已啟動成功 (v0.5)！");
     println!("👉 本機連線請於瀏覽器開啟: {}", url);
     println!("👉 區網其他裝置請連線: http://<本機IP>:{}", port);
     println!("👉 自動為您開啟預設瀏覽器中...");
     println!("--------------------------------------------------------");
     println!("提示：此系統為單機獨立運作，所有書籍與借還資料均儲存在本地 library.db");
-    println!("若欲關閉系統，直接關閉此終端視窗或按 Ctrl+C 即可。\n");
+    println!("若欲關閉系統，可在網頁右上角點擊「關閉系統」，或於右下角系統匣圖示按右鍵退出。\n");
 
     // 自動開啟預設瀏覽器
     let _ = open::that(&url);
+
+    // 7. 註冊 Windows 系統匣圖示 (System Tray)
+    #[cfg(windows)]
+    let _tray = match tray_item::TrayItem::new("圖書管理系統", tray_item::IconSource::Resource("app-icon")) {
+        Ok(mut t) => {
+            let _ = t.add_label("📚 圖書管理借還系統 (v0.5)");
+            let url_open = url.clone();
+            let _ = t.add_menu_item("開啟系統網頁", move || {
+                let _ = open::that(&url_open);
+            });
+            let _ = t.add_menu_item("關閉退出系統", || {
+                std::process::exit(0);
+            });
+            Some(t)
+        }
+        Err(e) => {
+            eprintln!("[!] 系統匣圖示初始化略過: {}", e);
+            None
+        }
+    };
 
     // 啟動 HTTP 伺服器
     axum::serve(listener, app).await?;

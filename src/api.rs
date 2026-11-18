@@ -103,6 +103,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/stats", get(get_stats_summary))
         .route("/api/settings", get(get_system_settings).post(save_system_settings))
         .route("/api/system/import-legacy", post(trigger_legacy_import))
+        .route("/api/system/shutdown", post(handle_system_shutdown))
+        // 圖示與網站 Favicon
+        .route("/favicon.ico", get(serve_favicon))
+        .route("/app.png", get(serve_app_png))
         // 匯入與範本
         .route("/api/import/books", post(handle_import_books))
         .route("/api/import/readers", post(handle_import_readers))
@@ -432,6 +436,28 @@ async fn trigger_legacy_import(State(state): State<AppState>) -> Json<ApiRespons
         Ok(msg) => Json(ApiResponse::ok(format!("舊系統資料匯入成功：{}", msg), msg)),
         Err(e) => Json(ApiResponse::err(format!("匯入失敗: {}", e))),
     }
+}
+
+async fn handle_system_shutdown() -> Json<ApiResponse<()>> {
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
+    Json(ApiResponse::ok("系統即將安全關閉", ()))
+}
+
+async fn serve_favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../app.ico").as_slice(),
+    )
+}
+
+async fn serve_app_png() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../app.png").as_slice(),
+    )
 }
 
 // === Excel / CSV 匯入 ===

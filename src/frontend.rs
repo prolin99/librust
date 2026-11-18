@@ -4,6 +4,8 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>現代化圖書管理借還系統</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" href="/app.png">
   <style>
     :root {
       --primary: #2563eb;
@@ -123,6 +125,10 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         💡 <strong>提示</strong>：第一次進入帳號、密碼預設均為 <code style="background: #e2e8f0; padding: 0.15rem 0.35rem; border-radius: 0.2rem; font-weight: bold; color: #1e293b;">admin</code>。<br>
         進入系統後可至「⚙️ 系統設定」更改密碼，密碼以安全加密格式保存於資料庫中。
       </div>
+
+      <div style="margin-top: 0.85rem; text-align: center;">
+        <button type="button" class="btn btn-outline btn-sm" style="color: #ef4444; border-color: #fca5a5; font-size: 0.82rem; padding: 0.35rem 0.75rem;" onclick="handleShutdown()">🛑 關閉系統服務</button>
+      </div>
     </div>
   </div>
 
@@ -144,6 +150,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
     <div id="user-info-bar" style="display: flex; align-items: center; gap: 0.75rem;">
       <span id="current-user-display" style="font-size: 0.9rem; color: #cbd5e1; font-weight: 500;">👤 admin</span>
       <button class="btn btn-outline btn-sm" style="color: white; border-color: #475569;" onclick="handleLogout()">🚪 登出</button>
+      <button class="btn btn-sm" style="color: #ffffff; background: #dc2626; border: 1px solid #b91c1c; font-weight: 600;" onclick="handleShutdown()" title="安全關閉圖書管理系統背景伺服器">🛑 關閉系統</button>
     </div>
   </header>
 
@@ -670,7 +677,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.4</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.5</code></span>
         <span style="color: #475569;">|</span>
         <a href="https://github.com/prolin99/librust/" target="_blank" rel="noopener noreferrer" title="前往 GitHub 專案庫" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
@@ -2576,6 +2583,27 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         await fetch('/api/auth/logout', { method: 'POST' });
       } catch (e) {}
       setLoggedOutState();
+    }
+
+    async function handleShutdown() {
+      if (!confirm('確定要安全關閉圖書管理系統嗎？\n\n關閉後將停止後台服務，本機與區網連線將會中斷。')) return;
+      try {
+        await fetch('/api/system/shutdown', { method: 'POST' });
+      } catch (e) {}
+      document.body.innerHTML = `
+        <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 2rem;">
+          <div style="text-align: center; max-width: 480px; background: #1e293b; padding: 2.5rem 2rem; border-radius: 1rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid #334155;">
+            <div style="font-size: 4rem; margin-bottom: 1rem;">📚💤</div>
+            <h2 style="font-size: 1.5rem; margin-bottom: 0.75rem; color: #38bdf8;">系統已安全關閉</h2>
+            <p style="color: #94a3b8; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem;">
+              資料庫已完整保存，背景伺服器已停止運行。<br>您現在可以安全關閉此瀏覽器分頁。
+            </p>
+            <div style="font-size: 0.85rem; color: #64748b; border-top: 1px solid #334155; padding-top: 1rem;">
+              若需重新使用，請再次執行「圖書管理系統.exe」即可啟動。
+            </div>
+          </div>
+        </div>
+      `;
     }
 
     // 初始化載入
