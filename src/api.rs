@@ -104,6 +104,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/settings", get(get_system_settings).post(save_system_settings))
         .route("/api/system/import-legacy", post(trigger_legacy_import))
         .route("/api/system/shutdown", post(handle_system_shutdown))
+        .route("/api/system/ping", get(handle_system_ping))
         // 圖示與網站 Favicon
         .route("/favicon.ico", get(serve_favicon))
         .route("/app.png", get(serve_app_png))
@@ -438,8 +439,27 @@ async fn trigger_legacy_import(State(state): State<AppState>) -> Json<ApiRespons
     }
 }
 
-async fn handle_system_shutdown() -> Json<ApiResponse<()>> {
-    tokio::spawn(async {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemPingResponse {
+    pub status: &'static str,
+    pub app: &'static str,
+    pub version: &'static str,
+}
+
+pub async fn handle_system_ping() -> Json<SystemPingResponse> {
+    Json(SystemPingResponse {
+        status: "ok",
+        app: "librust",
+        version: "0.6",
+    })
+}
+
+async fn handle_system_shutdown(State(state): State<AppState>) -> Json<ApiResponse<()>> {
+    let port_file = state.data_dir.parent().map(|p| p.join("library.port"));
+    tokio::spawn(async move {
+        if let Some(pf) = port_file {
+            let _ = std::fs::remove_file(pf);
+        }
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         std::process::exit(0);
     });

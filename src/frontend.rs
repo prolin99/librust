@@ -677,7 +677,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.5</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.6</code></span>
         <span style="color: #475569;">|</span>
         <a href="https://github.com/prolin99/librust/" target="_blank" rel="noopener noreferrer" title="前往 GitHub 專案庫" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
