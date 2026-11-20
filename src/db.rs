@@ -413,19 +413,87 @@ pub fn get_reader_by_id(db: &DbPool, id: &str) -> Result<Option<Reader>> {
     }
 }
 
-pub fn save_reader(db: &DbPool, reader: &Reader) -> std::result::Result<(), String> {
+/// 建立新讀者（若證號為空則延遲取號，在儲存時原子性派發；若已有證號則嚴格檢查避免覆蓋）
+pub fn create_reader(db: &DbPool, mut reader: Reader) -> std::result::Result<Reader, String> {
     let conn = db.lock().unwrap();
     let today = if reader.created_at.is_empty() {
         Local::now().format("%Y-%m-%d").to_string()
     } else {
         reader.created_at.clone()
     };
+    reader.created_at = today.clone();
+
+    // 延遲取號：若未提供證號，則在儲存當下由後端自動產生
+    if reader.id.trim().is_empty() {
+        let mut candidate = get_next_reader_id_internal(&conn)?;
+        let mut attempts = 0;
+        while conn.query_row("SELECT 1 FROM readers WHERE id = ?1", params![candidate], |_| Ok(())).is_ok() {
+            attempts += 1;
+            if attempts > 1000 {
+                return Err("無法自動產生未使用的讀者證號，請手動輸入證號！".to_string());
+            }
+            if let Ok(num) = candidate.parse::<u64>() {
+                let width = candidate.len();
+                candidate = format!("{:0>width$}", num + 1, width = width);
+            } else {
+                break;
+            }
+        }
+        reader.id = candidate;
+    } else {
+        // 使用者手動指定證號：檢查是否已存在，嚴禁覆蓋已有讀者
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM readers WHERE id = ?1",
+            params![reader.id],
+            |_| Ok(()),
+        ).is_ok();
+        if exists {
+            return Err(format!("新增失敗：讀者證號 [{}] 已經存在，請勿重複新增！", reader.id));
+        }
+    }
 
     conn.execute(
-        "INSERT OR REPLACE INTO readers (id, name, role_id, class_name, grade, phone, email, status, note, created_at)
+        "INSERT INTO readers (id, name, role_id, class_name, grade, phone, email, status, note, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![reader.id, reader.name, reader.role_id, reader.class_name, reader.grade, reader.phone, reader.email, reader.status, reader.note, today],
-    ).map_err(|e| format!("儲存讀者資料失敗: {}", e))?;
+        params![
+            reader.id,
+            reader.name,
+            reader.role_id,
+            reader.class_name,
+            reader.grade,
+            reader.phone,
+            reader.email,
+            reader.status,
+            reader.note,
+            today
+        ],
+    ).map_err(|e| format!("新增讀者資料失敗: {}", e))?;
+
+    Ok(reader)
+}
+
+/// 更新既有讀者資料
+pub fn update_reader(db: &DbPool, reader: &Reader) -> std::result::Result<(), String> {
+    let conn = db.lock().unwrap();
+    let rows = conn.execute(
+        "UPDATE readers SET name = ?2, role_id = ?3, class_name = ?4, grade = ?5, phone = ?6, email = ?7, status = ?8, note = ?9
+         WHERE id = ?1",
+        params![
+            reader.id,
+            reader.name,
+            reader.role_id,
+            reader.class_name,
+            reader.grade,
+            reader.phone,
+            reader.email,
+            reader.status,
+            reader.note,
+        ],
+    ).map_err(|e| format!("更新讀者資料失敗: {}", e))?;
+
+    if rows == 0 {
+        return Err(format!("找不到證號為 [{}] 的讀者，無法更新！", reader.id));
+    }
     Ok(())
 }
 
@@ -446,9 +514,8 @@ pub fn delete_reader(db: &DbPool, id: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// 取得下一個建議讀者證號（格式：五位數字補零，例如 00106）
-pub fn get_next_reader_id(db: &DbPool) -> std::result::Result<String, String> {
-    let conn = db.lock().unwrap();
+/// 從連線中分析所有現有讀者證號，取得下一個建議證號（五位數字補零）
+pub fn get_next_reader_id_internal(conn: &Connection) -> std::result::Result<String, String> {
     // 取所有 id，嘗試解析為數字，找最大值後 +1
     let mut stmt = conn.prepare("SELECT id FROM readers")
         .map_err(|e| e.to_string())?;
@@ -482,9 +549,14 @@ pub fn get_next_reader_id(db: &DbPool) -> std::result::Result<String, String> {
     Ok(format!("{:0>width$}", next, width = width))
 }
 
-/// 取得下一個建議書籍條碼（保留前綴字母，數字部分 +1，補足原有位數）
-pub fn get_next_book_id(db: &DbPool) -> std::result::Result<String, String> {
+/// 取得下一個建議讀者證號（格式：五位數字補零，例如 00106）
+pub fn get_next_reader_id(db: &DbPool) -> std::result::Result<String, String> {
     let conn = db.lock().unwrap();
+    get_next_reader_id_internal(&conn)
+}
+
+/// 從連線中分析所有現有書籍條碼，取得下一個建議條碼（保留前綴字母，數字部分 +1，補足原有位數）
+pub fn get_next_book_id_internal(conn: &Connection) -> std::result::Result<String, String> {
     let mut stmt = conn.prepare("SELECT id FROM books")
         .map_err(|e| e.to_string())?;
     let ids: Vec<String> = stmt
@@ -523,6 +595,12 @@ pub fn get_next_book_id(db: &DbPool) -> std::result::Result<String, String> {
     let next = best_num + 1;
     // 保持與最大號相同的數字位數
     Ok(format!("{}{:0>width$}", best_prefix, next, width = best_num_len))
+}
+
+/// 取得下一個建議書籍條碼（保留前綴字母，數字部分 +1，補足原有位數）
+pub fn get_next_book_id(db: &DbPool) -> std::result::Result<String, String> {
+    let conn = db.lock().unwrap();
+    get_next_book_id_internal(&conn)
 }
 
 // === 書籍操作 ===
@@ -667,19 +745,110 @@ pub fn get_book_by_id(db: &DbPool, id: &str) -> Result<Option<Book>> {
     }
 }
 
-pub fn save_book(db: &DbPool, book: &Book) -> std::result::Result<(), String> {
+/// 建立新書籍（若條碼為空則延遲取號，在儲存時原子性派發；若已有條碼則嚴格檢查避免覆蓋）
+pub fn create_book(db: &DbPool, mut book: Book) -> std::result::Result<Book, String> {
     let conn = db.lock().unwrap();
     let today = if book.created_at.is_empty() {
         Local::now().format("%Y-%m-%d").to_string()
     } else {
         book.created_at.clone()
     };
+    book.created_at = today.clone();
+
+    // 延遲取號：若未提供條碼，則在儲存當下由後端自動產生
+    if book.id.trim().is_empty() {
+        let mut candidate = get_next_book_id_internal(&conn)?;
+        let mut attempts = 0;
+        while conn.query_row("SELECT 1 FROM books WHERE id = ?1", params![candidate], |_| Ok(())).is_ok() {
+            attempts += 1;
+            if attempts > 1000 {
+                return Err("無法自動產生未使用的書籍條碼，請手動輸入條碼！".to_string());
+            }
+            let rev: Vec<char> = candidate.chars().rev().collect();
+            let digit_count = rev.iter().take_while(|c| c.is_ascii_digit()).count();
+            if digit_count > 0 {
+                let num_str: String = rev[..digit_count].iter().rev().collect();
+                if let Ok(n) = num_str.parse::<u64>() {
+                    let prefix = &candidate[..candidate.len() - digit_count];
+                    candidate = format!("{}{:0>width$}", prefix, n + 1, width = digit_count);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        book.id = candidate;
+    } else {
+        // 使用者手動指定條碼：檢查是否已存在，嚴禁覆蓋已有書籍
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM books WHERE id = ?1",
+            params![book.id],
+            |_| Ok(()),
+        ).is_ok();
+        if exists {
+            return Err(format!("新增失敗：書籍條碼 [{}] 已經存在，請勿重複新增！", book.id));
+        }
+    }
 
     conn.execute(
-        "INSERT OR REPLACE INTO books (id, title, author, publisher, pub_year, isbn, category, location, price, description, cover_url, status, borrow_count, enrichment_status, note, created_at)
+        "INSERT INTO books (id, title, author, publisher, pub_year, isbn, category, location, price, description, cover_url, status, borrow_count, enrichment_status, note, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-        params![book.id, book.title, book.author, book.publisher, book.pub_year, book.isbn, book.category, book.location, book.price, book.description, book.cover_url, book.status, book.borrow_count, book.enrichment_status, book.note, today],
-    ).map_err(|e| format!("儲存書籍失敗: {}", e))?;
+        params![
+            book.id,
+            book.title,
+            book.author,
+            book.publisher,
+            book.pub_year,
+            book.isbn,
+            book.category,
+            book.location,
+            book.price,
+            book.description,
+            book.cover_url,
+            book.status,
+            book.borrow_count,
+            book.enrichment_status,
+            book.note,
+            today
+        ],
+    ).map_err(|e| format!("新增書籍失敗: {}", e))?;
+
+    Ok(book)
+}
+
+/// 更新既有書籍資料（僅更新可修改的資訊，不覆蓋借閱狀態與計數）
+pub fn update_book(db: &DbPool, book: &Book) -> std::result::Result<(), String> {
+    let conn = db.lock().unwrap();
+    let rows = conn.execute(
+        "UPDATE books SET
+            title = ?2,
+            author = ?3,
+            publisher = ?4,
+            isbn = ?5,
+            category = ?6,
+            location = ?7,
+            description = ?8,
+            cover_url = (CASE WHEN ?9 != '' THEN ?9 ELSE cover_url END),
+            note = ?10
+         WHERE id = ?1",
+        params![
+            book.id,
+            book.title,
+            book.author,
+            book.publisher,
+            book.isbn,
+            book.category,
+            book.location,
+            book.description,
+            book.cover_url,
+            book.note,
+        ],
+    ).map_err(|e| format!("更新書籍失敗: {}", e))?;
+
+    if rows == 0 {
+        return Err(format!("找不到書籍條碼 [{}]，無法更新！", book.id));
+    }
     Ok(())
 }
 
@@ -1292,7 +1461,7 @@ mod tests {
             created_at: "2026-11-14".to_string(),
             active_loans_count: None,
         };
-        save_reader(&pool, &reader).unwrap();
+        create_reader(&pool, reader).unwrap();
 
         // 建立測試書籍
         let b1 = Book {
@@ -1314,7 +1483,7 @@ mod tests {
             created_at: "2026-11-14".to_string(),
             current_borrower: None,
         };
-        save_book(&pool, &b1).unwrap();
+        create_book(&pool, b1).unwrap();
 
         let b2 = Book {
             id: "BTEST02".to_string(),
@@ -1335,7 +1504,7 @@ mod tests {
             created_at: "2026-11-14".to_string(),
             current_borrower: None,
         };
-        save_book(&pool, &b2).unwrap();
+        create_book(&pool, b2).unwrap();
 
         // 插入一筆逾期借閱 (到期日設為 2020-01-01)
         {
@@ -1414,6 +1583,157 @@ mod tests {
         assert_eq!(validate_session(&pool, token), Some("admin".to_string()));
         delete_session(&pool, token).unwrap();
         assert_eq!(validate_session(&pool, token), None);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_delayed_id_allocation_and_duplicate_prevention() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("test_delayed_id_{}.db", fastrand::u64(..)));
+        let pool = init_db(&db_path).unwrap();
+
+        // 1. 測試書籍延遲取號（留空時系統自動派發）
+        let book1 = Book {
+            id: "".to_string(), // 空條碼
+            title: "第一本書".to_string(),
+            author: "作者A".to_string(),
+            publisher: "出版社A".to_string(),
+            pub_year: "".to_string(),
+            isbn: "9781234567890".to_string(),
+            category: "800".to_string(),
+            location: "A01".to_string(),
+            price: 200.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            current_borrower: None,
+        };
+        let saved_book1 = create_book(&pool, book1).unwrap();
+        assert_eq!(saved_book1.id, "B000001");
+
+        // 再次建立空條碼書籍，應自動遞增為 B000002
+        let book2 = Book {
+            id: "".to_string(),
+            title: "第二本書".to_string(),
+            author: "作者B".to_string(),
+            publisher: "出版社B".to_string(),
+            pub_year: "".to_string(),
+            isbn: "".to_string(),
+            category: "800".to_string(),
+            location: "A01".to_string(),
+            price: 250.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            current_borrower: None,
+        };
+        let saved_book2 = create_book(&pool, book2).unwrap();
+        assert_eq!(saved_book2.id, "B000002");
+
+        // 2. 測試手動輸入已存在條碼，必須報錯拒絕，不可覆蓋
+        let dup_book = Book {
+            id: "B000001".to_string(),
+            title: "意圖覆蓋的書名".to_string(),
+            author: "".to_string(),
+            publisher: "".to_string(),
+            pub_year: "".to_string(),
+            isbn: "".to_string(),
+            category: "".to_string(),
+            location: "".to_string(),
+            price: 0.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            current_borrower: None,
+        };
+        let dup_res = create_book(&pool, dup_book);
+        assert!(dup_res.is_err());
+        assert!(dup_res.unwrap_err().contains("已經存在"));
+
+        // 驗證原 B000001 書籍書名依然是「第一本書」
+        let check_b1 = get_book_by_id(&pool, "B000001").unwrap().unwrap();
+        assert_eq!(check_b1.title, "第一本書");
+
+        // 3. 測試讀者延遲取號
+        let reader1 = Reader {
+            id: "".to_string(), // 空證號
+            name: "第一位讀者".to_string(),
+            role_id: "01".to_string(),
+            role_name: None,
+            max_books: None,
+            borrow_days: None,
+            class_name: "資工一".to_string(),
+            grade: "1".to_string(),
+            phone: "".to_string(),
+            email: "".to_string(),
+            status: "active".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            active_loans_count: None,
+        };
+        let saved_r1 = create_reader(&pool, reader1).unwrap();
+        assert_eq!(saved_r1.id, "00001");
+
+        // 第二位讀者延遲取號
+        let reader2 = Reader {
+            id: "".to_string(),
+            name: "第二位讀者".to_string(),
+            role_id: "01".to_string(),
+            role_name: None,
+            max_books: None,
+            borrow_days: None,
+            class_name: "資工一".to_string(),
+            grade: "1".to_string(),
+            phone: "".to_string(),
+            email: "".to_string(),
+            status: "active".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            active_loans_count: None,
+        };
+        let saved_r2 = create_reader(&pool, reader2).unwrap();
+        assert_eq!(saved_r2.id, "00002");
+
+        // 手動重複新增已存在讀者證號，必須拒絕
+        let dup_reader = Reader {
+            id: "00001".to_string(),
+            name: "意圖覆蓋的讀者".to_string(),
+            role_id: "01".to_string(),
+            role_name: None,
+            max_books: None,
+            borrow_days: None,
+            class_name: "".to_string(),
+            grade: "".to_string(),
+            phone: "".to_string(),
+            email: "".to_string(),
+            status: "active".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            active_loans_count: None,
+        };
+        let dup_r_res = create_reader(&pool, dup_reader);
+        assert!(dup_r_res.is_err());
+        assert!(dup_r_res.unwrap_err().contains("已經存在"));
+
+        // 4. 測試正常更新
+        let mut r1_edit = check_b1;
+        r1_edit.title = "第一本書(新版)".to_string();
+        update_book(&pool, &r1_edit).unwrap();
+        let check_updated = get_book_by_id(&pool, "B000001").unwrap().unwrap();
+        assert_eq!(check_updated.title, "第一本書(新版)");
 
         let _ = std::fs::remove_file(db_path);
     }

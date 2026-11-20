@@ -677,7 +677,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.6</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.7</code></span>
         <span style="color: #475569;">|</span>
         <a href="https://github.com/prolin99/librust/" target="_blank" rel="noopener noreferrer" title="前往 GitHub 專案庫" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
@@ -721,8 +721,8 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         </button>
       </div>
       <div style="margin-bottom: 0.75rem;">
-        <label style="font-size: 0.85rem; font-weight: 600;">書籍條碼 / 登錄號 *</label>
-        <input type="text" id="bm-id" required>
+        <label style="font-size: 0.85rem; font-weight: 600;">書籍條碼 / 登錄號 <span id="bm-id-hint" style="color: #64748b; font-weight: normal; font-size: 0.8rem;">(留空則由系統於儲存時自動派發)</span></label>
+        <input type="text" id="bm-id" placeholder="留空由系統自動派發，或掃描現有條碼">
       </div>
       <div style="margin-bottom: 0.75rem;">
         <label style="font-size: 0.85rem; font-weight: 600;">書名 *</label>
@@ -769,8 +769,8 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         <button class="btn btn-outline btn-sm" onclick="closeModal('reader-modal')">✕</button>
       </div>
       <div style="margin-bottom: 0.75rem;">
-        <label style="font-size: 0.85rem; font-weight: 600;">讀者證號 / 學號 *</label>
-        <input type="text" id="rm-id" required>
+        <label style="font-size: 0.85rem; font-weight: 600;">讀者證號 / 學號 <span id="rm-id-hint" style="color: #64748b; font-weight: normal; font-size: 0.8rem;">(留空則由系統於儲存時自動派發)</span></label>
+        <input type="text" id="rm-id" placeholder="留空由系統自動派發，或手動輸入證號">
       </div>
       <div style="margin-bottom: 0.75rem;">
         <label style="font-size: 0.85rem; font-weight: 600;">姓名 *</label>
@@ -1467,7 +1467,17 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
 
     async function openBookModal(book = null) {
       document.getElementById('book-modal-title').textContent = book ? '編輯書籍' : '新增書籍';
-      document.getElementById('bm-id').readOnly = !!book;
+      const idInput = document.getElementById('bm-id');
+      const idHint = document.getElementById('bm-id-hint');
+      if (book) {
+        idInput.value = book.id;
+        idInput.readOnly = true;
+        if (idHint) idHint.textContent = '(不可變更)';
+      } else {
+        idInput.value = '';
+        idInput.readOnly = false;
+        if (idHint) idHint.textContent = '(留空則由系統於儲存時自動派發)';
+      }
       document.getElementById('bm-title').value = book ? book.title : '';
       document.getElementById('bm-author').value = book ? book.author : '';
       document.getElementById('bm-publisher').value = book ? book.publisher : '';
@@ -1483,23 +1493,6 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       if (srcBar) srcBar.style.display = 'none';
       const transBtn = document.getElementById('btn-translate-to-zh');
       if (transBtn) transBtn.style.display = 'none';
-
-      if (book) {
-        document.getElementById('bm-id').value = book.id;
-      } else {
-        document.getElementById('bm-id').value = '讀取預設條碼中...';
-        try {
-          const res = await fetch('/api/books/next-id');
-          const data = await res.json();
-          if (data.success && data.data) {
-            document.getElementById('bm-id').value = data.data;
-          } else {
-            document.getElementById('bm-id').value = '';
-          }
-        } catch (e) {
-          document.getElementById('bm-id').value = '';
-        }
-      }
 
       openModal('book-modal');
     }
@@ -1640,9 +1633,15 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
     }
 
     async function saveBookFromModal() {
+      const isEdit = document.getElementById('bm-id').readOnly;
+      const rawId = document.getElementById('bm-id').value.trim();
+      const title = document.getElementById('bm-title').value.trim();
+      if (!title) { alert('請填寫書名！'); return; }
+      if (isEdit && !rawId) { alert('書籍條碼不可為空！'); return; }
+
       const book = {
-        id: document.getElementById('bm-id').value.trim(),
-        title: document.getElementById('bm-title').value.trim(),
+        id: rawId,
+        title: title,
         author: document.getElementById('bm-author').value.trim(),
         publisher: document.getElementById('bm-publisher').value.trim(),
         pub_year: '',
@@ -1659,18 +1658,25 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         created_at: document.getElementById('bm-created-at').value,
         current_borrower: null,
       };
-      if (!book.id || !book.title) { alert('請填寫書籍條碼與書名！'); return; }
-      const res = await fetch('/api/books', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(book)
-      });
-      const data = await res.json();
-      if (data.success) {
-        closeModal('book-modal');
-        loadBooks();
-      } else {
-        alert(data.message);
+
+      const url = isEdit ? `/api/books/${encodeURIComponent(rawId)}` : '/api/books';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      try {
+        const res = await fetch(url, {
+          method: method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(book)
+        });
+        const data = await res.json();
+        if (data.success) {
+          closeModal('book-modal');
+          loadBooks();
+        } else {
+          alert(data.message || '儲存書籍失敗');
+        }
+      } catch (e) {
+        alert('網路請求失敗: ' + e);
       }
     }
 
@@ -1836,7 +1842,17 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
 
     async function openReaderModal(reader = null) {
       document.getElementById('reader-modal-title').textContent = reader ? '編輯讀者' : '新增讀者';
-      document.getElementById('rm-id').readOnly = !!reader;
+      const idInput = document.getElementById('rm-id');
+      const idHint = document.getElementById('rm-id-hint');
+      if (reader) {
+        idInput.value = reader.id;
+        idInput.readOnly = true;
+        if (idHint) idHint.textContent = '(不可變更)';
+      } else {
+        idInput.value = '';
+        idInput.readOnly = false;
+        if (idHint) idHint.textContent = '(留空則由系統於儲存時自動派發)';
+      }
       document.getElementById('rm-name').value = reader ? reader.name : '';
       document.getElementById('rm-class').value = reader ? reader.class_name : '';
       document.getElementById('rm-grade').value = reader ? reader.grade : '';
@@ -1846,32 +1862,21 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       document.getElementById('rm-created-at').value = reader ? reader.created_at : '';
       loadRolesForSelect(reader ? reader.role_id : '01');
 
-      if (reader) {
-        document.getElementById('rm-id').value = reader.id;
-      } else {
-        document.getElementById('rm-id').value = '讀取預設證號中...';
-        try {
-          const res = await fetch('/api/readers/next-id');
-          const data = await res.json();
-          if (data.success && data.data) {
-            document.getElementById('rm-id').value = data.data;
-          } else {
-            document.getElementById('rm-id').value = '';
-          }
-        } catch (e) {
-          document.getElementById('rm-id').value = '';
-        }
-      }
-
       openModal('reader-modal');
     }
 
     function editReader(reader) { openReaderModal(reader); }
 
     async function saveReaderFromModal() {
+      const isEdit = document.getElementById('rm-id').readOnly;
+      const rawId = document.getElementById('rm-id').value.trim();
+      const name = document.getElementById('rm-name').value.trim();
+      if (!name) { alert('請填寫讀者姓名！'); return; }
+      if (isEdit && !rawId) { alert('讀者證號不可為空！'); return; }
+
       const reader = {
-        id: document.getElementById('rm-id').value.trim(),
-        name: document.getElementById('rm-name').value.trim(),
+        id: rawId,
+        name: name,
         role_id: document.getElementById('rm-role-id').value,
         role_name: null,
         max_books: null,
@@ -1885,18 +1890,25 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         created_at: document.getElementById('rm-created-at').value,
         active_loans_count: 0,
       };
-      if (!reader.id || !reader.name) { alert('請填寫讀者證號與姓名！'); return; }
-      const res = await fetch('/api/readers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(reader)
-      });
-      const data = await res.json();
-      if (data.success) {
-        closeModal('reader-modal');
-        loadReaders();
-      } else {
-        alert(data.message);
+
+      const url = isEdit ? `/api/readers/${encodeURIComponent(rawId)}` : '/api/readers';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      try {
+        const res = await fetch(url, {
+          method: method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reader)
+        });
+        const data = await res.json();
+        if (data.success) {
+          closeModal('reader-modal');
+          loadReaders();
+        } else {
+          alert(data.message || '儲存讀者失敗');
+        }
+      } catch (e) {
+        alert('網路請求失敗: ' + e);
       }
     }
 

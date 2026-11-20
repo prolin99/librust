@@ -83,13 +83,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/roles", get(list_roles).post(create_or_update_role))
         .route("/api/roles/:id", delete(remove_role))
         // 讀者
-        .route("/api/readers", get(list_readers).post(create_or_update_reader))
+        .route("/api/readers", get(list_readers).post(create_reader_handler))
         .route("/api/readers/next-id", get(get_next_reader_id_handler))
-        .route("/api/readers/:id", get(get_reader).delete(remove_reader))
+        .route("/api/readers/:id", get(get_reader).put(update_reader_handler).delete(remove_reader))
         // 書籍
-        .route("/api/books", get(list_books).post(create_or_update_book))
+        .route("/api/books", get(list_books).post(create_book_handler))
         .route("/api/books/next-id", get(get_next_book_id_handler))
-        .route("/api/books/:id", get(get_book).delete(remove_book))
+        .route("/api/books/:id", get(get_book).put(update_book_handler).delete(remove_book))
         .route("/api/books/lookup-isbn", post(lookup_isbn))
         // 系統與翻譯
         .route("/api/system/translate", post(handle_translate))
@@ -174,15 +174,30 @@ async fn get_reader(
     }
 }
 
-async fn create_or_update_reader(
+async fn create_reader_handler(
     State(state): State<AppState>,
     Json(reader): Json<Reader>,
 ) -> Json<ApiResponse<Reader>> {
+    if reader.name.trim().is_empty() {
+        return Json(ApiResponse::err("讀者姓名不可為空！"));
+    }
+    match create_reader(&state.db, reader) {
+        Ok(saved) => Json(ApiResponse::ok("新增讀者成功", saved)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+async fn update_reader_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut reader): Json<Reader>,
+) -> Json<ApiResponse<Reader>> {
+    reader.id = id;
     if reader.id.trim().is_empty() || reader.name.trim().is_empty() {
         return Json(ApiResponse::err("讀者證號與姓名不可為空！"));
     }
-    match save_reader(&state.db, &reader) {
-        Ok(_) => Json(ApiResponse::ok("儲存讀者成功", reader)),
+    match update_reader(&state.db, &reader) {
+        Ok(_) => Json(ApiResponse::ok("更新讀者成功", reader)),
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -240,15 +255,30 @@ async fn get_book(
     }
 }
 
-async fn create_or_update_book(
+async fn create_book_handler(
     State(state): State<AppState>,
     Json(book): Json<Book>,
 ) -> Json<ApiResponse<Book>> {
+    if book.title.trim().is_empty() {
+        return Json(ApiResponse::err("書名不可為空！"));
+    }
+    match create_book(&state.db, book) {
+        Ok(saved) => Json(ApiResponse::ok("新增書籍成功", saved)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+async fn update_book_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut book): Json<Book>,
+) -> Json<ApiResponse<Book>> {
+    book.id = id;
     if book.id.trim().is_empty() || book.title.trim().is_empty() {
         return Json(ApiResponse::err("書籍條碼與書名不可為空！"));
     }
-    match save_book(&state.db, &book) {
-        Ok(_) => Json(ApiResponse::ok("儲存書籍成功", book)),
+    match update_book(&state.db, &book) {
+        Ok(_) => Json(ApiResponse::ok("更新書籍成功", book)),
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -450,7 +480,7 @@ pub async fn handle_system_ping() -> Json<SystemPingResponse> {
     Json(SystemPingResponse {
         status: "ok",
         app: "librust",
-        version: "0.6",
+        version: "0.7",
     })
 }
 

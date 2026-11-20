@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::write(&port_file, port.to_string());
 
     let url = format!("http://localhost:{}", port);
-    println!("\n[✔] 圖書管理系統已啟動成功 (v0.6)！");
+    println!("\n[✔] 圖書管理系統已啟動成功 (v0.7)！");
     println!("👉 本機連線請於瀏覽器開啟: {}", url);
     println!("👉 區網其他裝置請連線: http://<本機IP>:{}", port);
     println!("👉 自動為您開啟預設瀏覽器中...");
@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     let _tray = match tray_item::TrayItem::new("圖書管理系統", tray_item::IconSource::Resource("app-icon")) {
         Ok(mut t) => {
-            let _ = t.add_label("📚 圖書管理借還系統 (v0.6)");
+            let _ = t.add_label("📚 圖書管理借還系統 (v0.7)");
             let url_open = url.clone();
             let _ = t.add_menu_item("開啟系統網頁", move || {
                 let _ = open::that(&url_open);
