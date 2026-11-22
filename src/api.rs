@@ -8,6 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use chrono::Local;
 use crate::db::{*, get_next_reader_id, get_next_book_id};
 use crate::models::*;
 use crate::importer::*;
@@ -113,6 +114,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/import/readers", post(handle_import_readers))
         .route("/api/templates/books.csv", get(download_books_template))
         .route("/api/templates/readers.csv", get(download_readers_template))
+        // 資料匯出 (Excel / CSV)
+        .route("/api/export/readers.csv", get(export_readers_csv))
+        .route("/api/export/readers", get(export_readers_csv))
+        .route("/api/export/books.csv", get(export_books_csv))
+        .route("/api/export/books", get(export_books_csv))
+        .route("/api/export/active-loans.csv", get(export_active_loans_csv))
+        .route("/api/export/active-loans", get(export_active_loans_csv))
         // 封面圖片靜態路由
         .route("/covers/:filename", get(serve_cover_image))
         .with_state(state)
@@ -480,7 +488,7 @@ pub async fn handle_system_ping() -> Json<SystemPingResponse> {
     Json(SystemPingResponse {
         status: "ok",
         app: "librust",
-        version: "0.7",
+        version: "0.8",
     })
 }
 
@@ -614,6 +622,236 @@ async fn download_readers_template() -> impl IntoResponse {
         ],
         csv_content,
     )
+}
+
+// === 資料匯出 (Excel 相容 CSV) ===
+
+fn url_encode(s: &str) -> String {
+    let mut encoded = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            encoded.push(b as char);
+        } else {
+            encoded.push_str(&format!("%{:02X}", b));
+        }
+    }
+    encoded
+}
+
+async fn export_readers_csv(State(state): State<AppState>) -> impl IntoResponse {
+    let readers = match get_readers(&state.db, "") {
+        Ok(r) => r,
+        Err(_) => vec![],
+    };
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice("\u{FEFF}".as_bytes()); // UTF-8 BOM，以利 Excel 自動識別編碼
+    {
+        let mut wtr = csv::WriterBuilder::new().from_writer(&mut buf);
+        let _ = wtr.write_record(&[
+            "證號", "姓名", "身分別代碼", "身分別", "班級", "年級", "電話", "Email", "狀態", "建立日期", "目前在借冊數", "備註",
+        ]);
+        for r in readers {
+            let status_str = if r.status == "active" { "正常" } else { "停用" };
+            let loans_count = r.active_loans_count.unwrap_or(0).to_string();
+            let _ = wtr.write_record(&[
+                &r.id,
+                &r.name,
+                &r.role_id,
+                r.role_name.as_deref().unwrap_or(""),
+                &r.class_name,
+                &r.grade,
+                &r.phone,
+                &r.email,
+                status_str,
+                &r.created_at,
+                &loans_count,
+                &r.note,
+            ]);
+        }
+        let _ = wtr.flush();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let filename_ascii = format!("readers_{}.csv", timestamp);
+    let filename_utf8 = format!("讀者資料_{}.csv", timestamp);
+    let disposition = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        filename_ascii,
+        url_encode(&filename_utf8)
+    );
+
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv; charset=utf-8"));
+    if let Ok(val) = header::HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    (headers, buf)
+}
+
+async fn export_books_csv(State(state): State<AppState>) -> impl IntoResponse {
+    let books = match get_books(&state.db, "", "") {
+        Ok(b) => b,
+        Err(_) => vec![],
+    };
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice("\u{FEFF}".as_bytes()); // UTF-8 BOM
+    {
+        let mut wtr = csv::WriterBuilder::new().from_writer(&mut buf);
+        let _ = wtr.write_record(&[
+            "條碼", "書名", "作者", "出版社", "出版年", "ISBN", "分類", "存放位置", "定價", "館藏狀態", "借閱次數", "目前借閱人證號", "目前借閱人姓名", "借出日期", "應還日期", "建檔日期", "備註",
+        ]);
+        for b in books {
+            let status_str = match b.status.as_str() {
+                "available" => "可借閱",
+                "borrowed" => "出借中",
+                "lost" => "遺失",
+                "maintenance" => "館內維護",
+                s => s,
+            };
+            let (borrower_id, borrower_name, borrow_date, due_date) = if let Some(ref cb) = b.current_borrower {
+                (cb.reader_id.as_str(), cb.reader_name.as_str(), cb.borrow_date.as_str(), cb.due_date.as_str())
+            } else {
+                ("", "", "", "")
+            };
+            let price_str = if b.price.fract() == 0.0 {
+                format!("{:.0}", b.price)
+            } else {
+                format!("{:.2}", b.price)
+            };
+            let borrow_count_str = b.borrow_count.to_string();
+            let _ = wtr.write_record(&[
+                &b.id,
+                &b.title,
+                &b.author,
+                &b.publisher,
+                &b.pub_year,
+                &b.isbn,
+                &b.category,
+                &b.location,
+                &price_str,
+                status_str,
+                &borrow_count_str,
+                borrower_id,
+                borrower_name,
+                borrow_date,
+                due_date,
+                &b.created_at,
+                &b.note,
+            ]);
+        }
+        let _ = wtr.flush();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let filename_ascii = format!("books_{}.csv", timestamp);
+    let filename_utf8 = format!("書籍資料_{}.csv", timestamp);
+    let disposition = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        filename_ascii,
+        url_encode(&filename_utf8)
+    );
+
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv; charset=utf-8"));
+    if let Ok(val) = header::HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    (headers, buf)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportActiveLoansQuery {
+    pub status: Option<String>,
+    pub q: Option<String>,
+}
+
+async fn export_active_loans_csv(
+    State(state): State<AppState>,
+    Query(query): Query<ExportActiveLoansQuery>,
+) -> impl IntoResponse {
+    let loans = match get_active_loans(&state.db, None) {
+        Ok(l) => l,
+        Err(_) => vec![],
+    };
+
+    let status_filter = query.status.as_deref().unwrap_or("").trim();
+    let q_filter = query.q.as_deref().unwrap_or("").trim().to_lowercase();
+
+    let filtered_loans: Vec<LoanRecord> = loans.into_iter().filter(|item| {
+        if status_filter == "overdue" && !item.is_overdue {
+            return false;
+        }
+        if status_filter == "normal" && item.is_overdue {
+            return false;
+        }
+        if !q_filter.is_empty() {
+            let match_title = item.book_title.as_deref().unwrap_or("").to_lowercase().contains(&q_filter);
+            let match_book_id = item.book_id.to_lowercase().contains(&q_filter);
+            let match_reader_name = item.reader_name.as_deref().unwrap_or("").to_lowercase().contains(&q_filter);
+            let match_reader_id = item.reader_id.to_lowercase().contains(&q_filter);
+            if !match_title && !match_book_id && !match_reader_name && !match_reader_id {
+                return false;
+            }
+        }
+        true
+    }).collect();
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice("\u{FEFF}".as_bytes()); // UTF-8 BOM
+    {
+        let mut wtr = csv::WriterBuilder::new().from_writer(&mut buf);
+        let _ = wtr.write_record(&[
+            "借閱編號", "書籍條碼", "書名", "讀者證號", "借閱人姓名", "身分別", "借閱日期", "應還日期", "借閱狀態", "剩餘或逾期天數", "續借次數", "備註",
+        ]);
+        for l in filtered_loans {
+            let status_str = if l.is_overdue { "⚠️ 逾期催還" } else { "正常借閱中" };
+            let days_str = if l.is_overdue {
+                format!("逾期 {} 天", l.overdue_days.unwrap_or(0))
+            } else {
+                format!("剩餘 {} 天", l.days_remaining.unwrap_or(0))
+            };
+            let loan_id_str = l.id.to_string();
+            let renew_count_str = l.renew_count.to_string();
+
+            let _ = wtr.write_record(&[
+                &loan_id_str,
+                &l.book_id,
+                l.book_title.as_deref().unwrap_or(""),
+                &l.reader_id,
+                l.reader_name.as_deref().unwrap_or(""),
+                l.role_name.as_deref().unwrap_or(""),
+                &l.borrow_date,
+                &l.due_date,
+                status_str,
+                &days_str,
+                &renew_count_str,
+                &l.note,
+            ]);
+        }
+        let _ = wtr.flush();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let (filename_ascii, filename_utf8) = if status_filter == "overdue" {
+        (format!("overdue_loans_{}.csv", timestamp), format!("催還名單_{}.csv", timestamp))
+    } else {
+        (format!("active_loans_{}.csv", timestamp), format!("在借圖書清單_{}.csv", timestamp))
+    };
+
+    let disposition = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        filename_ascii,
+        url_encode(&filename_utf8)
+    );
+
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv; charset=utf-8"));
+    if let Ok(val) = header::HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    (headers, buf)
 }
 
 // === 認證與工作階段控制 ===
@@ -790,4 +1028,125 @@ async fn serve_cover_image(
 
     // 若圖片不存在，回傳 404
     (StatusCode::NOT_FOUND, "Cover not found").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn test_ping_version_is_0_8() {
+        let resp = handle_system_ping().await;
+        assert_eq!(resp.0.version, "0.8");
+    }
+
+    #[tokio::test]
+    async fn test_export_endpoints() {
+        let temp_dir = std::env::temp_dir().join(format!("test_export_{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("test.db");
+        let covers_dir = temp_dir.join("covers");
+        let data_dir = temp_dir.join("data");
+        std::fs::create_dir_all(&covers_dir).unwrap();
+
+        let db = init_db(&db_path).unwrap();
+
+        // 建立測試讀者
+        let test_reader = Reader {
+            id: "R888".to_string(),
+            name: "測試讀者888".to_string(),
+            role_id: "01".to_string(),
+            role_name: None,
+            max_books: Some(5),
+            borrow_days: Some(14),
+            class_name: "三年一班".to_string(),
+            grade: "3".to_string(),
+            phone: "0911222333".to_string(),
+            email: "r888@example.com".to_string(),
+            status: "active".to_string(),
+            note: "測試用備註".to_string(),
+            created_at: "2026-11-22".to_string(),
+            active_loans_count: Some(0),
+        };
+        let _ = create_reader(&db, test_reader);
+
+        // 建立測試書籍
+        let test_book = Book {
+            id: "B888".to_string(),
+            title: "測試書籍888".to_string(),
+            author: "測試作者".to_string(),
+            publisher: "測試出版社".to_string(),
+            pub_year: "2026".to_string(),
+            isbn: "9789570000000".to_string(),
+            category: "電腦科學".to_string(),
+            location: "A01".to_string(),
+            price: 500.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "測試書籍備註".to_string(),
+            created_at: "2026-11-22".to_string(),
+            current_borrower: None,
+        };
+        let _ = create_book(&db, test_book);
+
+        // 執行借閱以產生在借紀錄
+        let _ = borrow_book(&db, "R888", "B888");
+
+        let enricher = Arc::new(EnricherManager::new(covers_dir.clone()));
+
+        let state = AppState {
+            db: db.clone(),
+            data_dir: data_dir.clone(),
+            covers_dir: covers_dir.clone(),
+            enricher,
+        };
+
+        // 1. 測試讀者匯出
+        let resp = export_readers_csv(State(state.clone())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.starts_with('\u{FEFF}'));
+        assert!(content.contains("證號,姓名,身分別代碼"));
+        assert!(content.contains("R888,測試讀者888"));
+
+        // 2. 測試書籍匯出
+        let resp = export_books_csv(State(state.clone())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.starts_with('\u{FEFF}'));
+        assert!(content.contains("條碼,書名,作者"));
+        assert!(content.contains("B888,測試書籍888"));
+
+        // 3. 測試在借與催還匯出 (全部)
+        let resp = export_active_loans_csv(
+            State(state.clone()),
+            Query(ExportActiveLoansQuery { status: None, q: None }),
+        ).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.starts_with('\u{FEFF}'));
+        assert!(content.contains("借閱編號,書籍條碼,書名"));
+        assert!(content.contains("B888,測試書籍888,R888,測試讀者888"));
+
+        // 4. 測試在借與催還匯出 (篩選條件 - 無符合關鍵字)
+        let resp_empty = export_active_loans_csv(
+            State(state.clone()),
+            Query(ExportActiveLoansQuery { status: None, q: Some("不存在的關鍵字".to_string()) }),
+        ).await.into_response();
+        let bytes_empty = to_bytes(resp_empty.into_body(), usize::MAX).await.unwrap();
+        let content_empty = String::from_utf8_lossy(&bytes_empty);
+        assert!(content_empty.starts_with('\u{FEFF}'));
+        assert!(content_empty.contains("借閱編號,書籍條碼,書名"));
+        assert!(!content_empty.contains("B888"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

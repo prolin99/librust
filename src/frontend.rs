@@ -248,6 +248,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
           </div>
           <div style="display: flex; gap: 0.5rem;">
             <button class="btn btn-outline" onclick="loadActiveLoans()">🔄 重新整理</button>
+            <button class="btn btn-success" onclick="exportActiveLoans()">📥 匯出 Excel (CSV)</button>
           </div>
         </div>
 
@@ -323,6 +324,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
             <button class="btn btn-outline" onclick="document.getElementById('import-books-input').click()">📥 匯入 Excel/CSV</button>
             <input type="file" id="import-books-input" style="display: none;" accept=".xlsx,.xls,.csv" onchange="uploadBooksFile(this)">
             <a href="/api/templates/books.csv" class="btn btn-outline" download>📄 下載範本</a>
+            <a href="/api/export/books.csv" class="btn btn-outline" download>📥 匯出 Excel/CSV</a>
             <button class="btn btn-primary" onclick="openBookModal()">➕ 新增書籍</button>
           </div>
         </div>
@@ -396,6 +398,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
             <button class="btn btn-outline" onclick="document.getElementById('import-readers-input').click()">📥 匯入 Excel/CSV</button>
             <input type="file" id="import-readers-input" style="display: none;" accept=".xlsx,.xls,.csv" onchange="uploadReadersFile(this)">
             <a href="/api/templates/readers.csv" class="btn btn-outline" download>📄 下載範本</a>
+            <a href="/api/export/readers.csv" class="btn btn-outline" download>📥 匯出 Excel/CSV</a>
             <button class="btn btn-primary" onclick="openReaderModal()">➕ 新增讀者</button>
           </div>
         </div>
@@ -641,6 +644,21 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
 
         <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
 
+        <h3 style="color: var(--primary); margin-bottom: 0.5rem;">📊 系統資料匯出 (Excel / CSV)</h3>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+          提供將讀者資料與書籍資料完整匯出為 Excel 相容之 CSV 試算表（含 UTF-8 BOM），可直接以 Microsoft Excel、WPS、Google 試算表開啟，適合全館資料備份、報表製作與統計檢視。
+        </p>
+        <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+          <a href="/api/export/readers.csv" class="btn btn-outline" style="color: var(--primary); border-color: var(--primary); text-decoration: none;" download>
+            📥 匯出讀者資料 (Excel / CSV)
+          </a>
+          <a href="/api/export/books.csv" class="btn btn-outline" style="color: var(--primary); border-color: var(--primary); text-decoration: none;" download>
+            📥 匯出書籍資料 (Excel / CSV)
+          </a>
+        </div>
+
+        <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
+
         <h3 style="color: var(--primary); margin-bottom: 0.5rem;">🔐 變更管理員登入密碼</h3>
         <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
           密碼記錄經不可逆之安全雜湊（bcrypt 加密）存入資料庫，絕非明碼儲存，保障系統安全。
@@ -677,7 +695,7 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.7</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.8</code></span>
         <span style="color: #475569;">|</span>
         <a href="https://github.com/prolin99/librust/" target="_blank" rel="noopener noreferrer" title="前往 GitHub 專案庫" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
@@ -1195,6 +1213,18 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
 
       activeLoansCurrentPage = 1;
       renderActiveLoansTable();
+    }
+
+    function exportActiveLoans() {
+      const q = (document.getElementById('active-loans-search')?.value || '').trim();
+      const filter = document.getElementById('active-loans-status-filter')?.value || '';
+      const url = `/api/export/active-loans.csv?status=${encodeURIComponent(filter)}&q=${encodeURIComponent(q)}`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     }
 
     function changeActiveLoansPageSize(val) {
