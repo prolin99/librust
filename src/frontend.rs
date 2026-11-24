@@ -1,4 +1,4 @@
-pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
+pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
@@ -582,6 +582,140 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- 期間借閱統計分析：月份統計圖 + 個人/書籍排行 + 匯出 -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem;">
+          <div>
+            <h3 style="margin: 0;">📅 期間借閱統計分析（月份人次／冊數與排行榜）</h3>
+            <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.25rem;">
+              依指定時間範圍統計每月借閱人次（同讀者同日計 1 人次）與借閱冊數，並列出個人借閱與書籍被借排行。
+            </p>
+          </div>
+          <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
+            <button type="button" class="btn btn-outline btn-sm" onclick="setStatsPreset('6m')">近 6 個月</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="setStatsPreset('1y')">近 1 年</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="setStatsPreset('year')">今年度</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="setStatsPreset('all')">全部期間</button>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap; background: #f8fafc; padding: 0.85rem 1rem; border-radius: 0.5rem; border: 1px solid var(--border); margin-bottom: 1rem;">
+          <div>
+            <label style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.25rem;">開始日期</label>
+            <input type="date" id="stats-start-date" style="width: 155px; padding: 0.4rem 0.6rem;">
+          </div>
+          <div>
+            <label style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.25rem;">結束日期</label>
+            <input type="date" id="stats-end-date" style="width: 155px; padding: 0.4rem 0.6rem;">
+          </div>
+          <div>
+            <label style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.25rem;">排行筆數 <span style="font-weight: normal;">(0=全部)</span></label>
+            <input type="number" id="stats-limit" value="20" min="0" max="10000" style="width: 100px; padding: 0.4rem 0.6rem;">
+          </div>
+          <button type="button" class="btn btn-primary" onclick="loadRangeStats()">🔍 查詢統計</button>
+          <div style="margin-left: auto; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button type="button" class="btn btn-outline btn-sm" style="color: var(--success); border-color: var(--success);" onclick="exportRangeStatsCsv('monthly')">📥 匯出月份統計 (Excel / CSV)</button>
+          </div>
+        </div>
+
+        <!-- 期間總覽指標 -->
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
+          <div style="flex: 1; min-width: 180px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 0.5rem; padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 0.88rem; color: #065f46; font-weight: 600;">👥 期間總借閱人次</span>
+            <span id="range-total-visits" style="font-size: 1.5rem; font-weight: bold; color: #059669;">-</span>
+          </div>
+          <div style="flex: 1; min-width: 180px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 0.5rem; padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 0.88rem; color: #1e40af; font-weight: 600;">📖 期間總借閱冊數</span>
+            <span id="range-total-books" style="font-size: 1.5rem; font-weight: bold; color: #2563eb;">-</span>
+          </div>
+          <div style="flex: 1; min-width: 180px; background: #f8fafc; border: 1px solid var(--border); border-radius: 0.5rem; padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 0.88rem; color: #475569; font-weight: 600;">📆 統計月份數</span>
+            <span id="range-month-count" style="font-size: 1.5rem; font-weight: bold; color: #334155;">-</span>
+          </div>
+        </div>
+
+        <!-- 月份借閱統計圖 (SVG) -->
+        <div style="border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; background: #ffffff; margin-bottom: 1rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;">
+            <strong style="font-size: 0.95rem;">📊 每月借閱人次與冊數統計圖</strong>
+            <div style="display: flex; gap: 1rem; font-size: 0.82rem; align-items: center;">
+              <span style="display: inline-flex; align-items: center; gap: 0.35rem;"><span style="width: 12px; height: 12px; background: #10b981; border-radius: 2px; display: inline-block;"></span>借閱人次</span>
+              <span style="display: inline-flex; align-items: center; gap: 0.35rem;"><span style="width: 12px; height: 12px; background: #2563eb; border-radius: 2px; display: inline-block;"></span>借閱冊數</span>
+            </div>
+          </div>
+          <div id="monthly-borrow-chart" style="overflow-x: auto; min-height: 240px;">
+            <p style="text-align: center; color: var(--text-muted); padding: 3rem 0;">載入統計圖中...</p>
+          </div>
+        </div>
+
+        <!-- 月份統計明細表（可折疊） -->
+        <details style="margin-bottom: 1.25rem;">
+          <summary style="cursor: pointer; font-size: 0.88rem; font-weight: 600; color: var(--primary); padding: 0.35rem 0;">📋 展開／收合月份借閱明細表</summary>
+          <div class="table-container" style="margin-top: 0.5rem; max-height: 260px; overflow-y: auto;">
+            <table id="monthly-stats-table">
+              <thead>
+                <tr>
+                  <th>月份</th>
+                  <th>借閱人次</th>
+                  <th>借閱冊數</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="3" style="text-align: center; color: var(--text-muted);">載入中...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+
+        <!-- 期間內個人借閱冊數排行 & 書籍被借次數排行 -->
+        <div class="grid grid-2">
+          <div style="border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; background: #ffffff;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;">
+              <h4 style="margin: 0;">👤 個人借閱冊數排行 <span id="reader-rank-badge" class="badge badge-info">前 20 筆</span></h4>
+              <button type="button" class="btn btn-outline btn-sm" style="color: var(--primary); border-color: var(--primary);" onclick="exportRangeStatsCsv('readers')">📥 匯出 Excel / CSV</button>
+            </div>
+            <div class="table-container" style="max-height: 360px; overflow-y: auto;">
+              <table id="reader-rank-table">
+                <thead>
+                  <tr>
+                    <th style="width: 55px;">排名</th>
+                    <th>讀者證號 / 姓名</th>
+                    <th>身分 / 班級</th>
+                    <th style="text-align: right;">人次</th>
+                    <th style="text-align: right;">冊數</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">載入中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style="border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; background: #ffffff;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;">
+              <h4 style="margin: 0;">📚 書籍被借次數排行 <span id="book-rank-badge" class="badge badge-info">前 20 筆</span></h4>
+              <button type="button" class="btn btn-outline btn-sm" style="color: var(--primary); border-color: var(--primary);" onclick="exportRangeStatsCsv('books')">📥 匯出 Excel / CSV</button>
+            </div>
+            <div class="table-container" style="max-height: 360px; overflow-y: auto;">
+              <table id="book-rank-table">
+                <thead>
+                  <tr>
+                    <th style="width: 55px;">排名</th>
+                    <th>書籍條碼 / 書名</th>
+                    <th>作者 / 分類</th>
+                    <th style="text-align: right;">被借次數</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">載入中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="grid grid-2">
         <div class="card">
           <h3 style="margin-bottom: 1rem;">🔥 最熱門借閱排行 Top 8</h3>
@@ -695,13 +829,16 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.8</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.9</code></span>
         <span style="color: #475569;">|</span>
-        <a href="https://github.com/prolin99/librust/" target="_blank" rel="noopener noreferrer" title="前往 GitHub 專案庫" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
+        <a id="github-releases-link" href="https://github.com/prolin99/librust/releases" target="_blank" rel="noopener noreferrer" title="前往 GitHub Releases 下載頁面" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
             <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
           </svg>
-          <span>GitHub</span>
+          <span>GitHub Releases</span>
+        </a>
+        <a id="update-notify-badge" href="https://github.com/prolin99/librust/releases" target="_blank" rel="noopener noreferrer" title="點擊前往下載最新版本" style="display: none; align-items: center; gap: 0.3rem; background: #f59e0b; color: #0f172a; padding: 0.15rem 0.55rem; border-radius: 9999px; font-size: 0.78rem; font-weight: 700; text-decoration: none; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.35);">
+          <span>🔔 發現新版</span>
         </a>
       </div>
       <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
@@ -2370,7 +2507,224 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
     }
 
     // === 8. 統計儀表板 ===
+    let statsRangeInitialized = false;
+
+    function formatDateYmd(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function setStatsPreset(preset, autoLoad = true) {
+      const now = new Date();
+      const startEl = document.getElementById('stats-start-date');
+      const endEl = document.getElementById('stats-end-date');
+      if (!startEl || !endEl) return;
+
+      if (preset === 'all') {
+        startEl.value = '';
+        endEl.value = '';
+      } else if (preset === '6m') {
+        const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+        startEl.value = formatDateYmd(start);
+        endEl.value = formatDateYmd(now);
+      } else if (preset === '1y') {
+        const start = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+        startEl.value = formatDateYmd(start);
+        endEl.value = formatDateYmd(now);
+      } else if (preset === 'year') {
+        const start = new Date(now.getFullYear(), 0, 1);
+        startEl.value = formatDateYmd(start);
+        endEl.value = formatDateYmd(now);
+      }
+      if (autoLoad) loadRangeStats();
+    }
+
+    function getRangeStatsParams() {
+      const startDate = (document.getElementById('stats-start-date')?.value || '').trim();
+      const endDate = (document.getElementById('stats-end-date')?.value || '').trim();
+      const rawLimit = parseInt(document.getElementById('stats-limit')?.value ?? '20', 10);
+      const limit = Number.isNaN(rawLimit) || rawLimit < 0 ? 20 : rawLimit;
+      const params = new URLSearchParams();
+      if (startDate) params.set('start_date', startDate);
+      if (endDate) params.set('end_date', endDate);
+      params.set('limit', String(limit));
+      return { startDate, endDate, limit, queryString: params.toString() };
+    }
+
+    function exportRangeStatsCsv(kind) {
+      const { queryString } = getRangeStatsParams();
+      const url = `/api/export/stats/${kind}.csv?${queryString}`;
+      window.location.href = url;
+    }
+
+    function renderMonthlyChart(monthlyStats) {
+      const container = document.getElementById('monthly-borrow-chart');
+      if (!container) return;
+
+      if (!monthlyStats || monthlyStats.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 3rem 0;">此時間範圍內尚無借閱紀錄 📭</p>';
+        return;
+      }
+
+      const maxVal = Math.max(
+        1,
+        ...monthlyStats.map(m => Math.max(m.borrow_visits || 0, m.borrow_books || 0))
+      );
+      // 取漂亮的 Y 軸上限
+      const rawStep = maxVal / 4;
+      const mag = Math.pow(10, Math.floor(Math.log10(Math.max(1, rawStep))));
+      const niceStep = Math.ceil(rawStep / mag) * mag;
+      const yMax = niceStep * 4;
+
+      const padLeft = 48;
+      const padRight = 20;
+      const padTop = 26;
+      const padBottom = 52;
+      const chartHeight = 200;
+      const groupWidth = Math.max(58, Math.min(90, Math.floor(960 / Math.max(1, monthlyStats.length))));
+      const svgWidth = Math.max(600, padLeft + padRight + monthlyStats.length * groupWidth);
+      const svgHeight = padTop + chartHeight + padBottom;
+      const barWidth = Math.min(22, Math.floor((groupWidth - 18) / 2));
+      const barGap = 4;
+
+      let gridHtml = '';
+      for (let i = 0; i <= 4; i++) {
+        const val = Math.round((yMax / 4) * i);
+        const y = padTop + chartHeight - (chartHeight * i) / 4;
+        gridHtml += `
+          <line x1="${padLeft}" y1="${y}" x2="${svgWidth - padRight}" y2="${y}" stroke="#e2e8f0" stroke-dasharray="${i === 0 ? '' : '3,3'}" />
+          <text x="${padLeft - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="#64748b">${val}</text>
+        `;
+      }
+
+      let barsHtml = '';
+      monthlyStats.forEach((m, idx) => {
+        const cx = padLeft + idx * groupWidth + groupWidth / 2;
+        const visits = m.borrow_visits || 0;
+        const books = m.borrow_books || 0;
+        const hVisits = (visits / yMax) * chartHeight;
+        const hBooks = (books / yMax) * chartHeight;
+        const xVisits = cx - barWidth - barGap / 2;
+        const xBooks = cx + barGap / 2;
+        const yVisits = padTop + chartHeight - hVisits;
+        const yBooks = padTop + chartHeight - hBooks;
+
+        barsHtml += `
+          <g>
+            <rect x="${xVisits}" y="${yVisits}" width="${barWidth}" height="${Math.max(0, hVisits)}" rx="3" fill="#10b981">
+              <title>${escapeHtml(m.month)} 借閱人次：${visits} 人次</title>
+            </rect>
+            ${visits > 0 ? `<text x="${xVisits + barWidth / 2}" y="${yVisits - 5}" text-anchor="middle" font-size="10" font-weight="600" fill="#059669">${visits}</text>` : ''}
+            <rect x="${xBooks}" y="${yBooks}" width="${barWidth}" height="${Math.max(0, hBooks)}" rx="3" fill="#2563eb">
+              <title>${escapeHtml(m.month)} 借閱冊數：${books} 冊</title>
+            </rect>
+            ${books > 0 ? `<text x="${xBooks + barWidth / 2}" y="${yBooks - 5}" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">${books}</text>` : ''}
+            <text x="${cx}" y="${padTop + chartHeight + 18}" text-anchor="middle" font-size="11" fill="#334155" font-weight="500">${escapeHtml(m.month)}</text>
+          </g>
+        `;
+      });
+
+      container.innerHTML = `
+        <svg width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" style="display: block; margin: 0 auto;">
+          ${gridHtml}
+          ${barsHtml}
+        </svg>
+      `;
+    }
+
+    async function loadRangeStats() {
+      const { limit, queryString } = getRangeStatsParams();
+      const rankLabel = limit === 0 ? '全部' : `前 ${limit} 筆`;
+      const rb = document.getElementById('reader-rank-badge');
+      const bb = document.getElementById('book-rank-badge');
+      if (rb) rb.textContent = rankLabel;
+      if (bb) bb.textContent = rankLabel;
+
+      try {
+        const res = await fetch(`/api/stats/range?${queryString}`);
+        const data = await res.json();
+        if (!data.success || !data.data) return;
+
+        const r = data.data;
+        document.getElementById('range-total-visits').textContent = r.total_visits;
+        document.getElementById('range-total-books').textContent = r.total_books;
+        document.getElementById('range-month-count').textContent = (r.monthly_stats || []).length;
+
+        renderMonthlyChart(r.monthly_stats || []);
+
+        // 月份明細表
+        const monthTbody = document.querySelector('#monthly-stats-table tbody');
+        if (monthTbody) {
+          const list = r.monthly_stats || [];
+          if (list.length === 0) {
+            monthTbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 1rem;">此期間無資料</td></tr>';
+          } else {
+            monthTbody.innerHTML = list.map(m => `
+              <tr>
+                <td><strong>${escapeHtml(m.month)}</strong></td>
+                <td style="color: #059669; font-weight: 600;">${m.borrow_visits} 人次</td>
+                <td style="color: #2563eb; font-weight: 600;">${m.borrow_books} 冊</td>
+              </tr>
+            `).join('') + `
+              <tr style="background: #f8fafc; font-weight: bold;">
+                <td>合計</td>
+                <td style="color: #059669;">${r.total_visits} 人次</td>
+                <td style="color: #2563eb;">${r.total_books} 冊</td>
+              </tr>
+            `;
+          }
+        }
+
+        // 個人借閱冊數排行
+        const readerTbody = document.querySelector('#reader-rank-table tbody');
+        if (readerTbody) {
+          const list = r.reader_rankings || [];
+          if (list.length === 0) {
+            readerTbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">此時間範圍內尚無個人借閱紀錄</td></tr>';
+          } else {
+            readerTbody.innerHTML = list.map((item, idx) => `
+              <tr>
+                <td><strong>#${idx + 1}</strong></td>
+                <td><strong>${escapeHtml(item.reader_name)}</strong> <span style="font-size: 0.78rem; color: var(--text-muted);">(${escapeHtml(item.reader_id)})</span></td>
+                <td style="font-size: 0.82rem; color: var(--text-muted);">${escapeHtml(item.role_name || '-')}${item.class_name ? ' / ' + escapeHtml(item.class_name) : ''}</td>
+                <td style="text-align: right; color: #059669; font-weight: 600;">${item.borrow_visits}</td>
+                <td style="text-align: right;"><span class="badge badge-info">${item.borrow_books} 冊</span></td>
+              </tr>
+            `).join('');
+          }
+        }
+
+        // 書籍被借次數排行
+        const bookTbody = document.querySelector('#book-rank-table tbody');
+        if (bookTbody) {
+          const list = r.book_rankings || [];
+          if (list.length === 0) {
+            bookTbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">此時間範圍內尚無書籍借閱紀錄</td></tr>';
+          } else {
+            bookTbody.innerHTML = list.map((item, idx) => `
+              <tr>
+                <td><strong>#${idx + 1}</strong></td>
+                <td><strong>${escapeHtml(item.title)}</strong> <span style="font-size: 0.78rem; color: var(--text-muted);">(${escapeHtml(item.book_id)})</span></td>
+                <td style="font-size: 0.82rem; color: var(--text-muted);">${escapeHtml(item.author || '-')}${item.category ? ' / ' + escapeHtml(item.category) : ''}</td>
+                <td style="text-align: right;"><span class="badge badge-info">${item.borrow_count} 次</span></td>
+              </tr>
+            `).join('');
+          }
+        }
+      } catch (e) {
+        console.error('載入期間統計失敗:', e);
+      }
+    }
+
     async function loadStats() {
+      if (!statsRangeInitialized) {
+        statsRangeInitialized = true;
+        setStatsPreset('1y', false);
+      }
+      loadRangeStats();
+
       const res = await fetch('/api/stats');
       const data = await res.json();
       if (data.success && data.data) {
@@ -2648,11 +3002,31 @@ pub const HTML_PAGE: &str = r#"<!DOCTYPE html>
       `;
     }
 
+    // 檢查 GitHub 是否有新版本發布
+    async function checkForUpdates() {
+      try {
+        const res = await fetch('/api/system/check-update');
+        const data = await res.json();
+        if (data.success && data.data && data.data.has_update) {
+          const badge = document.getElementById('update-notify-badge');
+          if (badge) {
+            const latest = data.data.latest_version || '新版';
+            badge.href = data.data.release_url || 'https://github.com/prolin99/librust/releases';
+            badge.innerHTML = `<span>🔔 發現新版 ${escapeHtml(latest)}！前往更新</span>`;
+            badge.style.display = 'inline-flex';
+          }
+        }
+      } catch (e) {
+        // 離線環境或檢查失敗時靜默略過
+      }
+    }
+
     // 初始化載入
     window.addEventListener('DOMContentLoaded', () => {
       checkAuthStatus();
+      checkForUpdates();
     });
   </script>
 </body>
 </html>
-"#;
+"##;

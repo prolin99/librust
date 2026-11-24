@@ -119,6 +119,52 @@ pub struct BookStat {
     pub borrow_count: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthlyBorrowStat {
+    pub month: String,       // YYYY-MM
+    pub borrow_visits: i64,  // 借閱人次 (同日同讀者計 1 人次)
+    pub borrow_books: i64,   // 借閱冊數
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReaderBorrowRank {
+    pub reader_id: String,
+    pub reader_name: String,
+    pub role_name: String,
+    pub class_name: String,
+    pub borrow_visits: i64,  // 借閱人次
+    pub borrow_books: i64,   // 借閱冊數
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookBorrowRank {
+    pub book_id: String,
+    pub title: String,
+    pub author: String,
+    pub category: String,
+    pub borrow_count: i64,   // 期間內被借次數
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RangeStatsReport {
+    pub start_date: String,
+    pub end_date: String,
+    pub limit: i64,
+    pub total_visits: i64,
+    pub total_books: i64,
+    pub monthly_stats: Vec<MonthlyBorrowStat>,
+    pub reader_rankings: Vec<ReaderBorrowRank>,
+    pub book_rankings: Vec<BookBorrowRank>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub has_update: bool,
+    pub release_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BorrowRequest {
     pub reader_id: String,

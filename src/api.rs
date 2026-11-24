@@ -14,6 +14,13 @@ use crate::models::*;
 use crate::importer::*;
 use crate::enricher::EnricherManager;
 
+pub const APP_VERSION: &str = "0.9";
+pub const GITHUB_RELEASES_URL: &str = "https://github.com/prolin99/librust/releases";
+const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/prolin99/librust/releases/latest";
+const GITHUB_RELEASES_LIST_API: &str = "https://api.github.com/repos/prolin99/librust/releases?per_page=1";
+
+static UPDATE_CACHE: std::sync::OnceLock<tokio::sync::RwLock<Option<(std::time::Instant, UpdateCheckResult)>>> = std::sync::OnceLock::new();
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: DbPool,
@@ -102,10 +109,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/circulation/history", get(list_loan_history))
         // 統計與系統
         .route("/api/stats", get(get_stats_summary))
+        .route("/api/stats/range", get(get_stats_range))
         .route("/api/settings", get(get_system_settings).post(save_system_settings))
         .route("/api/system/import-legacy", post(trigger_legacy_import))
         .route("/api/system/shutdown", post(handle_system_shutdown))
         .route("/api/system/ping", get(handle_system_ping))
+        .route("/api/system/check-update", get(handle_check_update))
         // 圖示與網站 Favicon
         .route("/favicon.ico", get(serve_favicon))
         .route("/app.png", get(serve_app_png))
@@ -121,6 +130,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/export/books", get(export_books_csv))
         .route("/api/export/active-loans.csv", get(export_active_loans_csv))
         .route("/api/export/active-loans", get(export_active_loans_csv))
+        .route("/api/export/stats/monthly.csv", get(export_stats_monthly_csv))
+        .route("/api/export/stats/readers.csv", get(export_stats_readers_csv))
+        .route("/api/export/stats/books.csv", get(export_stats_books_csv))
         // 封面圖片靜態路由
         .route("/covers/:filename", get(serve_cover_image))
         .with_state(state)
@@ -463,10 +475,33 @@ async fn list_loan_history(
 
 // === 統計與匯入 ===
 
+#[derive(Debug, Deserialize)]
+pub struct RangeStatsQuery {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub limit: Option<i64>,
+}
+
 async fn get_stats_summary(State(state): State<AppState>) -> Json<ApiResponse<StatsSummary>> {
     match get_stats(&state.db) {
         Ok(stats) => Json(ApiResponse::ok("統計獲取成功", stats)),
         Err(e) => Json(ApiResponse::err(format!("統計獲取失敗: {}", e))),
+    }
+}
+
+async fn get_stats_range(
+    State(state): State<AppState>,
+    Query(query): Query<RangeStatsQuery>,
+) -> Json<ApiResponse<RangeStatsReport>> {
+    let limit = query.limit.unwrap_or(20);
+    match get_range_stats_report(
+        &state.db,
+        query.start_date.as_deref(),
+        query.end_date.as_deref(),
+        limit,
+    ) {
+        Ok(report) => Json(ApiResponse::ok("區間統計獲取成功", report)),
+        Err(e) => Json(ApiResponse::err(format!("區間統計獲取失敗: {}", e))),
     }
 }
 
@@ -488,8 +523,129 @@ pub async fn handle_system_ping() -> Json<SystemPingResponse> {
     Json(SystemPingResponse {
         status: "ok",
         app: "librust",
-        version: "0.8",
+        version: APP_VERSION,
     })
+}
+
+/// 將版本字串解析為數字陣列，例如 "v0.9.1" -> [0, 9, 1]、"0.10" -> [0, 10]
+pub fn parse_version_numbers(v: &str) -> Vec<u32> {
+    let trimmed = v.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+    let main_part = trimmed.split(|c| c == '-' || c == '+').next().unwrap_or(trimmed);
+    main_part
+        .split('.')
+        .filter_map(|part| {
+            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() { None } else { digits.parse::<u32>().ok() }
+        })
+        .collect()
+}
+
+/// 判斷 latest 版本是否比 current 新
+pub fn is_newer_version(current: &str, latest: &str) -> bool {
+    let cur = parse_version_numbers(current);
+    let lat = parse_version_numbers(latest);
+    if cur.is_empty() || lat.is_empty() {
+        return false;
+    }
+    let max_len = cur.len().max(lat.len());
+    for i in 0..max_len {
+        let c = *cur.get(i).unwrap_or(&0);
+        let l = *lat.get(i).unwrap_or(&0);
+        if l > c {
+            return true;
+        }
+        if l < c {
+            return false;
+        }
+    }
+    false
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseItem {
+    tag_name: String,
+    html_url: Option<String>,
+    #[serde(default)]
+    draft: bool,
+}
+
+async fn fetch_latest_github_release() -> Option<(String, String)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .user_agent(format!("LibRust/{}", APP_VERSION))
+        .build()
+        .ok()?;
+
+    // 1. 先查詢 /releases/latest（正式穩定版）
+    if let Ok(resp) = client
+        .get(GITHUB_LATEST_RELEASE_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(item) = resp.json::<GithubReleaseItem>().await {
+                if !item.tag_name.trim().is_empty() {
+                    let url = item.html_url.unwrap_or_else(|| GITHUB_RELEASES_URL.to_string());
+                    return Some((item.tag_name, url));
+                }
+            }
+        }
+    }
+
+    // 2. 若尚無 latest 正式版（例如僅有 pre-release），退而檢查最新一筆非草稿 release
+    if let Ok(resp) = client
+        .get(GITHUB_RELEASES_LIST_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(items) = resp.json::<Vec<GithubReleaseItem>>().await {
+                if let Some(item) = items.into_iter().find(|r| !r.draft && !r.tag_name.trim().is_empty()) {
+                    let url = item.html_url.unwrap_or_else(|| GITHUB_RELEASES_URL.to_string());
+                    return Some((item.tag_name, url));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn handle_check_update() -> Json<ApiResponse<UpdateCheckResult>> {
+    let cache = UPDATE_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
+    {
+        let guard = cache.read().await;
+        if let Some((checked_at, ref cached)) = *guard {
+            if checked_at.elapsed() < std::time::Duration::from_secs(1800) {
+                return Json(ApiResponse::ok("版本檢查完成", cached.clone()));
+            }
+        }
+    }
+
+    let result = match fetch_latest_github_release().await {
+        Some((tag, url)) => {
+            let has_update = is_newer_version(APP_VERSION, &tag);
+            let res = UpdateCheckResult {
+                current_version: APP_VERSION.to_string(),
+                latest_version: Some(tag),
+                has_update,
+                release_url: url,
+            };
+            let mut guard = cache.write().await;
+            *guard = Some((std::time::Instant::now(), res.clone()));
+            res
+        }
+        None => UpdateCheckResult {
+            current_version: APP_VERSION.to_string(),
+            latest_version: None,
+            has_update: false,
+            release_url: GITHUB_RELEASES_URL.to_string(),
+        },
+    };
+
+    Json(ApiResponse::ok("版本檢查完成", result))
 }
 
 async fn handle_system_shutdown(State(state): State<AppState>) -> Json<ApiResponse<()>> {
@@ -854,6 +1010,186 @@ async fn export_active_loans_csv(
     (headers, buf)
 }
 
+fn build_csv_response(buf: Vec<u8>, filename_ascii: &str, filename_utf8: &str) -> (header::HeaderMap, Vec<u8>) {
+    let disposition = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        filename_ascii,
+        url_encode(filename_utf8)
+    );
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv; charset=utf-8"));
+    if let Ok(val) = header::HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    (headers, buf)
+}
+
+async fn export_stats_monthly_csv(
+    State(state): State<AppState>,
+    Query(query): Query<RangeStatsQuery>,
+) -> impl IntoResponse {
+    let report = match get_range_stats_report(
+        &state.db,
+        query.start_date.as_deref(),
+        query.end_date.as_deref(),
+        0,
+    ) {
+        Ok(r) => r,
+        Err(_) => RangeStatsReport {
+            start_date: "".to_string(),
+            end_date: "".to_string(),
+            limit: 0,
+            total_visits: 0,
+            total_books: 0,
+            monthly_stats: vec![],
+            reader_rankings: vec![],
+            book_rankings: vec![],
+        },
+    };
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice("\u{FEFF}".as_bytes());
+    {
+        let mut wtr = csv::WriterBuilder::new().from_writer(&mut buf);
+        let _ = wtr.write_record(&["月份", "借閱人次", "借閱冊數"]);
+        for m in &report.monthly_stats {
+            let _ = wtr.write_record(&[
+                m.month.as_str(),
+                &m.borrow_visits.to_string(),
+                &m.borrow_books.to_string(),
+            ]);
+        }
+        let _ = wtr.write_record(&[
+            "合計",
+            &report.total_visits.to_string(),
+            &report.total_books.to_string(),
+        ]);
+        let _ = wtr.flush();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    build_csv_response(
+        buf,
+        &format!("monthly_borrow_stats_{}.csv", timestamp),
+        &format!("月份借閱統計_{}.csv", timestamp),
+    )
+}
+
+async fn export_stats_readers_csv(
+    State(state): State<AppState>,
+    Query(query): Query<RangeStatsQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(20);
+    let report = match get_range_stats_report(
+        &state.db,
+        query.start_date.as_deref(),
+        query.end_date.as_deref(),
+        limit,
+    ) {
+        Ok(r) => r,
+        Err(_) => RangeStatsReport {
+            start_date: "".to_string(),
+            end_date: "".to_string(),
+            limit,
+            total_visits: 0,
+            total_books: 0,
+            monthly_stats: vec![],
+            reader_rankings: vec![],
+            book_rankings: vec![],
+        },
+    };
+
+    let range_label = format!(
+        "{} ~ {}",
+        if report.start_date.is_empty() { "不限" } else { &report.start_date },
+        if report.end_date.is_empty() { "不限" } else { &report.end_date }
+    );
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice("\u{FEFF}".as_bytes());
+    {
+        let mut wtr = csv::WriterBuilder::new().from_writer(&mut buf);
+        let _ = wtr.write_record(&["排名", "讀者證號", "姓名", "身分別", "班級/部門", "借閱人次", "借閱冊數", "統計期間"]);
+        for (idx, r) in report.reader_rankings.iter().enumerate() {
+            let _ = wtr.write_record(&[
+                &(idx + 1).to_string(),
+                r.reader_id.as_str(),
+                r.reader_name.as_str(),
+                r.role_name.as_str(),
+                r.class_name.as_str(),
+                &r.borrow_visits.to_string(),
+                &r.borrow_books.to_string(),
+                &range_label,
+            ]);
+        }
+        let _ = wtr.flush();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    build_csv_response(
+        buf,
+        &format!("reader_borrow_ranking_{}.csv", timestamp),
+        &format!("個人借閱冊數統計_{}.csv", timestamp),
+    )
+}
+
+async fn export_stats_books_csv(
+    State(state): State<AppState>,
+    Query(query): Query<RangeStatsQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(20);
+    let report = match get_range_stats_report(
+        &state.db,
+        query.start_date.as_deref(),
+        query.end_date.as_deref(),
+        limit,
+    ) {
+        Ok(r) => r,
+        Err(_) => RangeStatsReport {
+            start_date: "".to_string(),
+            end_date: "".to_string(),
+            limit,
+            total_visits: 0,
+            total_books: 0,
+            monthly_stats: vec![],
+            reader_rankings: vec![],
+            book_rankings: vec![],
+        },
+    };
+
+    let range_label = format!(
+        "{} ~ {}",
+        if report.start_date.is_empty() { "不限" } else { &report.start_date },
+        if report.end_date.is_empty() { "不限" } else { &report.end_date }
+    );
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice("\u{FEFF}".as_bytes());
+    {
+        let mut wtr = csv::WriterBuilder::new().from_writer(&mut buf);
+        let _ = wtr.write_record(&["排名", "書籍條碼", "書名", "作者", "分類", "被借次數", "統計期間"]);
+        for (idx, b) in report.book_rankings.iter().enumerate() {
+            let _ = wtr.write_record(&[
+                &(idx + 1).to_string(),
+                b.book_id.as_str(),
+                b.title.as_str(),
+                b.author.as_str(),
+                b.category.as_str(),
+                &b.borrow_count.to_string(),
+                &range_label,
+            ]);
+        }
+        let _ = wtr.flush();
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    build_csv_response(
+        buf,
+        &format!("book_borrow_ranking_{}.csv", timestamp),
+        &format!("書籍被借次數統計_{}.csv", timestamp),
+    )
+}
+
 // === 認證與工作階段控制 ===
 
 fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -1037,9 +1373,159 @@ mod tests {
     use axum::body::to_bytes;
 
     #[tokio::test]
-    async fn test_ping_version_is_0_8() {
+    async fn test_ping_version_is_0_9() {
         let resp = handle_system_ping().await;
-        assert_eq!(resp.0.version, "0.8");
+        assert_eq!(resp.0.version, "0.9");
+    }
+
+    #[test]
+    fn test_version_comparison() {
+        assert!(is_newer_version("0.9", "0.10"));
+        assert!(is_newer_version("0.9", "v0.9.1"));
+        assert!(is_newer_version("0.9", "1.0"));
+        assert!(is_newer_version("0.9", "V1.0.0"));
+        assert!(!is_newer_version("0.9", "0.9"));
+        assert!(!is_newer_version("0.9", "v0.9.0"));
+        assert!(!is_newer_version("0.9", "0.8"));
+        assert!(!is_newer_version("0.9", "v0.8.9"));
+        assert!(!is_newer_version("0.9", ""));
+    }
+
+    #[tokio::test]
+    async fn test_range_stats_and_csv_exports() {
+        let temp_dir = std::env::temp_dir().join(format!("test_range_stats_{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("test.db");
+        let covers_dir = temp_dir.join("covers");
+        let data_dir = temp_dir.join("data");
+        std::fs::create_dir_all(&covers_dir).unwrap();
+
+        let db = init_db(&db_path).unwrap();
+
+        // 建立測試讀者與書籍
+        for (rid, rname) in [("R01", "王小明"), ("R02", "李小華")] {
+            let _ = create_reader(&db, Reader {
+                id: rid.to_string(),
+                name: rname.to_string(),
+                role_id: "01".to_string(),
+                role_name: None,
+                max_books: Some(10),
+                borrow_days: Some(14),
+                class_name: "三年忠班".to_string(),
+                grade: "3".to_string(),
+                phone: "".to_string(),
+                email: "".to_string(),
+                status: "active".to_string(),
+                note: "".to_string(),
+                created_at: "2026-01-01".to_string(),
+                active_loans_count: None,
+            });
+        }
+        for (bid, title) in [("B01", "Rust 程式設計"), ("B02", "演算法圖鑑")] {
+            let _ = create_book(&db, Book {
+                id: bid.to_string(),
+                title: title.to_string(),
+                author: "作者".to_string(),
+                publisher: "出版社".to_string(),
+                pub_year: "2026".to_string(),
+                isbn: "".to_string(),
+                category: "電腦".to_string(),
+                location: "A01".to_string(),
+                price: 300.0,
+                description: "".to_string(),
+                cover_url: "".to_string(),
+                status: "available".to_string(),
+                borrow_count: 0,
+                enrichment_status: "none".to_string(),
+                note: "".to_string(),
+                created_at: "2026-01-01".to_string(),
+                current_borrower: None,
+            });
+        }
+
+        // 插入跨月份借閱紀錄：
+        // 2026-01: R01 同日借 B01, B02 (1 人次, 2 冊)；R02 借 B01 (1 人次, 1 冊) -> 合計 2 人次, 3 冊
+        // 2026-03: R01 借 B01 (1 人次, 1 冊) -> 2026-02 應補 0
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO loans (book_id, reader_id, borrow_date, due_date, return_date, status, renew_count, note) VALUES
+                 ('B01', 'R01', '2026-01-10', '2026-01-24', '2026-01-20', 'returned', 0, ''),
+                 ('B02', 'R01', '2026-01-10', '2026-01-24', '2026-01-20', 'returned', 0, ''),
+                 ('B01', 'R02', '2026-01-15', '2026-01-29', '2026-01-25', 'returned', 0, ''),
+                 ('B01', 'R01', '2026-03-05', '2026-03-19', '2026-03-15', 'returned', 0, '')",
+                [],
+            ).unwrap();
+        }
+
+        let report = get_range_stats_report(&db, Some("2026-01-01"), Some("2026-03-31"), 1).unwrap();
+        assert_eq!(report.monthly_stats.len(), 3);
+        assert_eq!(report.monthly_stats[0].month, "2026-01");
+        assert_eq!(report.monthly_stats[0].borrow_visits, 2);
+        assert_eq!(report.monthly_stats[0].borrow_books, 3);
+        assert_eq!(report.monthly_stats[1].month, "2026-02");
+        assert_eq!(report.monthly_stats[1].borrow_visits, 0);
+        assert_eq!(report.monthly_stats[1].borrow_books, 0);
+        assert_eq!(report.monthly_stats[2].month, "2026-03");
+        assert_eq!(report.monthly_stats[2].borrow_visits, 1);
+        assert_eq!(report.monthly_stats[2].borrow_books, 1);
+        assert_eq!(report.total_visits, 3);
+        assert_eq!(report.total_books, 4);
+
+        // limit = 1 時，個人排行只回傳第一名 R01 (2 人次, 3 冊)
+        assert_eq!(report.reader_rankings.len(), 1);
+        assert_eq!(report.reader_rankings[0].reader_id, "R01");
+        assert_eq!(report.reader_rankings[0].borrow_visits, 2);
+        assert_eq!(report.reader_rankings[0].borrow_books, 3);
+
+        // limit = 1 時，書籍排行只回傳第一名 B01 (3 次)
+        assert_eq!(report.book_rankings.len(), 1);
+        assert_eq!(report.book_rankings[0].book_id, "B01");
+        assert_eq!(report.book_rankings[0].borrow_count, 3);
+
+        // 測試 3 個 CSV 匯出端點
+        let state = AppState {
+            db: db.clone(),
+            data_dir,
+            covers_dir: covers_dir.clone(),
+            enricher: Arc::new(EnricherManager::new(covers_dir)),
+        };
+
+        let q = RangeStatsQuery {
+            start_date: Some("2026-01-01".to_string()),
+            end_date: Some("2026-03-31".to_string()),
+            limit: Some(10),
+        };
+        let r1 = export_stats_monthly_csv(State(state.clone()), Query(q)).await.into_response();
+        let b1 = to_bytes(r1.into_body(), usize::MAX).await.unwrap();
+        let s1 = String::from_utf8_lossy(&b1);
+        assert!(s1.starts_with('\u{FEFF}'));
+        assert!(s1.contains("月份,借閱人次,借閱冊數"));
+        assert!(s1.contains("2026-01,2,3"));
+
+        let q2 = RangeStatsQuery {
+            start_date: Some("2026-01-01".to_string()),
+            end_date: Some("2026-03-31".to_string()),
+            limit: Some(10),
+        };
+        let r2 = export_stats_readers_csv(State(state.clone()), Query(q2)).await.into_response();
+        let b2 = to_bytes(r2.into_body(), usize::MAX).await.unwrap();
+        let s2 = String::from_utf8_lossy(&b2);
+        assert!(s2.contains("讀者證號,姓名"));
+        assert!(s2.contains("R01,王小明"));
+
+        let q3 = RangeStatsQuery {
+            start_date: Some("2026-01-01".to_string()),
+            end_date: Some("2026-03-31".to_string()),
+            limit: Some(10),
+        };
+        let r3 = export_stats_books_csv(State(state), Query(q3)).await.into_response();
+        let b3 = to_bytes(r3.into_body(), usize::MAX).await.unwrap();
+        let s3 = String::from_utf8_lossy(&b3);
+        assert!(s3.contains("書籍條碼,書名"));
+        assert!(s3.contains("B01,Rust 程式設計"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]

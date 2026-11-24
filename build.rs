@@ -6,8 +6,8 @@ fn main() {
         res.set_icon_with_id("app.ico", "app-icon");
         res.set("ProductName", "圖書管理借還系統");
         res.set("FileDescription", "現代化單機版圖書管理借還系統");
-        res.set("ProductVersion", "0.8.0.0");
-        res.set("FileVersion", "0.8.0.0");
+        res.set("ProductVersion", "0.9.0.0");
+        res.set("FileVersion", "0.9.0.0");
         if let Err(e) = res.compile() {
             eprintln!("Warning: Failed to compile Windows resource: {}", e);
         }

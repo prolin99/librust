@@ -163,7 +163,7 @@ D:\antig\Library\
 
 ## 👨‍💻 作者與版權聲明
 
-- **下載連結**：https://github.com/prolin99/librust/
+- **下載連結**：https://github.com/prolin99/librust/releases
 - **製作者**：prolin99@gmail.com
 - **開發說明**：使用 AI 協作輔助撰寫之 Rust 高效能單機版圖書管理系統
 - **授權協議**：[MIT License](LICENSE)

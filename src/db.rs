@@ -7,8 +7,183 @@ use crate::legacy::{read_dbf, format_dbf_date};
 
 pub type DbPool = Arc<Mutex<Connection>>;
 
+/// 目前資料庫結構版本號；未來每當資料表或欄位有異動時遞增，並於 `run_migrations` 加入對應升級步驟
+pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+
+/// 檢查指定資料表是否已存在某欄位
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let sql = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&sql)?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(cols.iter().any(|c| c.eq_ignore_ascii_case(column)))
+}
+
+/// 若指定資料表缺少某欄位，自動執行 ALTER TABLE 補齊（回傳 true 表示有新增）
+fn ensure_column(conn: &Connection, table: &str, column: &str, col_def: &str) -> Result<bool> {
+    if !column_exists(conn, table, column)? {
+        let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_def);
+        conn.execute(&sql, [])?;
+        println!("[↑] 資料庫自動修正：資料表 {} 已補齊缺少欄位 {}", table, column);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// 防禦性欄位自檢：確保所有核心資料表皆具備最新版所需欄位，避免舊版資料庫缺少欄位導致查詢失敗
+fn ensure_all_expected_columns(conn: &Connection) -> Result<usize> {
+    let expected_columns: &[(&str, &str, &str)] = &[
+        // roles
+        ("roles", "max_books", "INTEGER NOT NULL DEFAULT 5"),
+        ("roles", "borrow_days", "INTEGER NOT NULL DEFAULT 14"),
+        ("roles", "renew_days", "INTEGER NOT NULL DEFAULT 7"),
+        ("roles", "note", "TEXT NOT NULL DEFAULT ''"),
+        // readers
+        ("readers", "role_id", "TEXT NOT NULL DEFAULT '01'"),
+        ("readers", "class_name", "TEXT NOT NULL DEFAULT ''"),
+        ("readers", "grade", "TEXT NOT NULL DEFAULT ''"),
+        ("readers", "phone", "TEXT NOT NULL DEFAULT ''"),
+        ("readers", "email", "TEXT NOT NULL DEFAULT ''"),
+        ("readers", "status", "TEXT NOT NULL DEFAULT 'active'"),
+        ("readers", "note", "TEXT NOT NULL DEFAULT ''"),
+        ("readers", "created_at", "TEXT NOT NULL DEFAULT ''"),
+        // books
+        ("books", "author", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "publisher", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "pub_year", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "isbn", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "category", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "location", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "price", "REAL NOT NULL DEFAULT 0.0"),
+        ("books", "description", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "cover_url", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "status", "TEXT NOT NULL DEFAULT 'available'"),
+        ("books", "borrow_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("books", "enrichment_status", "TEXT NOT NULL DEFAULT 'none'"),
+        ("books", "note", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "created_at", "TEXT NOT NULL DEFAULT ''"),
+        // loans
+        ("loans", "return_date", "TEXT"),
+        ("loans", "status", "TEXT NOT NULL DEFAULT 'active'"),
+        ("loans", "renew_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("loans", "note", "TEXT NOT NULL DEFAULT ''"),
+        // users & sessions
+        ("users", "created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("sessions", "created_at", "TEXT NOT NULL DEFAULT ''"),
+    ];
+
+    let mut added = 0usize;
+    for &(table, col, def) in expected_columns {
+        if ensure_column(conn, table, col, def)? {
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+/// 在進行舊資料庫結構升級前，自動建立一份完整備份檔，確保使用者資料安全無虞
+fn backup_database_before_migration(path: &Path, conn: &Connection, from_ver: i32, to_ver: i32) -> Option<std::path::PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    // 先將 WAL 資料寫回主資料庫檔案，確保複製出來的備份檔完整一致
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let file_name = path.file_name()?.to_string_lossy();
+    let backup_name = format!("{}.bak_v{}_to_v{}_{}", file_name, from_ver, to_ver, timestamp);
+    let backup_path = path.with_file_name(backup_name);
+    if std::fs::copy(path, &backup_path).is_ok() {
+        Some(backup_path)
+    } else {
+        None
+    }
+}
+
+/// 執行版本化資料庫結構自動遷移 (Schema Migrations)
+fn run_migrations(conn: &mut Connection, path: &Path, existed_with_data: bool) -> Result<()> {
+    let mut current_ver: i32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    // 建立遷移紀錄表（紀錄歷次自動升級歷史）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );"
+    )?;
+
+    // 若為既有舊資料庫且版本低於目前版本，升級前先自動備份
+    if existed_with_data && current_ver < CURRENT_SCHEMA_VERSION {
+        if let Some(bak) = backup_database_before_migration(path, conn, current_ver, CURRENT_SCHEMA_VERSION) {
+            println!(
+                "[i] 偵測到舊版資料庫 (schema v{} -> v{})，已自動備份至: {}",
+                current_ver,
+                CURRENT_SCHEMA_VERSION,
+                bak.display()
+            );
+        }
+    }
+
+    // 1. 先執行防禦性欄位自檢（補齊任何舊版資料庫缺少的欄位）
+    ensure_all_expected_columns(conn)?;
+
+    // 2. 依序執行版本化遷移（每個版本包在交易中，確保原子性）
+    if current_ver < 1 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_loans_active ON loans(status, reader_id, book_id);
+            CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
+            CREATE INDEX IF NOT EXISTS idx_readers_role ON readers(role_id);
+            "
+        )?;
+        let now = Local::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations (version, description, applied_at) VALUES (1, ?1, ?2)",
+            params!["初始化基礎資料表、補齊舊版缺少欄位與核心索引", now],
+        )?;
+        tx.pragma_update(None, "user_version", 1i32)?;
+        tx.commit()?;
+        current_ver = 1;
+    }
+
+    if current_ver < 2 {
+        let tx = conn.transaction()?;
+        // v0.9 升級：加入借閱日期與統計索引，並將舊資料可能存在的斜線日期 (YYYY/MM/DD) 正規化為 YYYY-MM-DD
+        tx.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_loans_borrow_date ON loans(borrow_date);
+            CREATE INDEX IF NOT EXISTS idx_loans_reader_date ON loans(reader_id, borrow_date);
+            UPDATE loans SET borrow_date = replace(borrow_date, '/', '-') WHERE borrow_date LIKE '%/%';
+            UPDATE loans SET due_date = replace(due_date, '/', '-') WHERE due_date LIKE '%/%';
+            UPDATE loans SET return_date = replace(return_date, '/', '-') WHERE return_date IS NOT NULL AND return_date LIKE '%/%';
+            "
+        )?;
+        let now = Local::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations (version, description, applied_at) VALUES (2, ?1, ?2)",
+            params!["v0.9 統計索引建立與歷史借閱日期格式正規化", now],
+        )?;
+        tx.pragma_update(None, "user_version", 2i32)?;
+        tx.commit()?;
+        current_ver = 2;
+    }
+
+    let _ = current_ver;
+    Ok(())
+}
+
 pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
-    let conn = Connection::open(path)?;
+    let path_ref = path.as_ref();
+    let existed_with_data = path_ref.exists()
+        && std::fs::metadata(path_ref).map(|m| m.len() > 0).unwrap_or(false);
+
+    let mut conn = Connection::open(path_ref)?;
     conn.execute_batch(
         "
         PRAGMA foreign_keys = ON;
@@ -84,12 +259,11 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
             username TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
-
-        CREATE INDEX IF NOT EXISTS idx_loans_active ON loans(status, reader_id, book_id);
-        CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
-        CREATE INDEX IF NOT EXISTS idx_readers_role ON readers(role_id);
         "
     )?;
+
+    // 自動檢查並升級舊資料庫結構（新增缺少欄位、索引與版本化遷移）
+    run_migrations(&mut conn, path_ref, existed_with_data)?;
 
     // 設定預設身分別 (若不存在)
     let role_count: i64 = conn.query_row("SELECT COUNT(*) FROM roles", [], |r| r.get(0)).unwrap_or(0);
@@ -1350,6 +1524,157 @@ pub fn get_stats(db: &DbPool) -> Result<StatsSummary> {
     })
 }
 
+/// 依時間範圍統計月份借閱人次與冊數，以及個人借閱排行與書籍被借排行
+pub fn get_range_stats_report(
+    db: &DbPool,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    limit: i64,
+) -> Result<RangeStatsReport> {
+    let conn = db.lock().unwrap();
+    let start = start_date.map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("");
+    let end = end_date.map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("");
+    let effective_limit = if limit <= 0 { 100_000 } else { limit };
+
+    // 1. 月份借閱人次（同讀者同日計 1 人次）與借閱冊數
+    let mut month_stmt = conn.prepare(
+        "SELECT substr(l.borrow_date, 1, 7) AS ym,
+                COUNT(DISTINCT l.reader_id || '|' || substr(l.borrow_date, 1, 10)) AS visits,
+                COUNT(*) AS books
+         FROM loans l
+         WHERE length(l.borrow_date) >= 7
+           AND (?1 = '' OR substr(l.borrow_date, 1, 10) >= ?1)
+           AND (?2 = '' OR substr(l.borrow_date, 1, 10) <= ?2)
+         GROUP BY ym
+         ORDER BY ym ASC"
+    )?;
+
+    let raw_monthly: Vec<MonthlyBorrowStat> = month_stmt.query_map(params![start, end], |r| {
+        Ok(MonthlyBorrowStat {
+            month: r.get(0)?,
+            borrow_visits: r.get(1)?,
+            borrow_books: r.get(2)?,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+
+    // 若使用者有指定起訖日期且跨度在 60 個月以內，補齊期間內無借閱的月份（數值為 0），使趨勢圖連續易讀
+    let monthly_stats = fill_missing_months(&raw_monthly, start, end);
+
+    let total_visits: i64 = monthly_stats.iter().map(|m| m.borrow_visits).sum();
+    let total_books: i64 = monthly_stats.iter().map(|m| m.borrow_books).sum();
+
+    // 2. 時間範圍內個人借閱冊數排行
+    let mut reader_stmt = conn.prepare(
+        "SELECT l.reader_id,
+                COALESCE(r.name, l.reader_id) AS reader_name,
+                COALESCE(ro.name, '') AS role_name,
+                COALESCE(r.class_name, '') AS class_name,
+                COUNT(DISTINCT substr(l.borrow_date, 1, 10)) AS visits,
+                COUNT(*) AS books
+         FROM loans l
+         LEFT JOIN readers r ON l.reader_id = r.id
+         LEFT JOIN roles ro ON r.role_id = ro.id
+         WHERE length(l.borrow_date) >= 7
+           AND (?1 = '' OR substr(l.borrow_date, 1, 10) >= ?1)
+           AND (?2 = '' OR substr(l.borrow_date, 1, 10) <= ?2)
+         GROUP BY l.reader_id
+         ORDER BY books DESC, visits DESC, l.reader_id ASC
+         LIMIT ?3"
+    )?;
+
+    let reader_rankings: Vec<ReaderBorrowRank> = reader_stmt.query_map(params![start, end, effective_limit], |r| {
+        Ok(ReaderBorrowRank {
+            reader_id: r.get(0)?,
+            reader_name: r.get(1)?,
+            role_name: r.get(2)?,
+            class_name: r.get(3)?,
+            borrow_visits: r.get(4)?,
+            borrow_books: r.get(5)?,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+
+    // 3. 時間範圍內書籍被借次數排行
+    let mut book_stmt = conn.prepare(
+        "SELECT l.book_id,
+                COALESCE(b.title, l.book_id) AS title,
+                COALESCE(b.author, '') AS author,
+                COALESCE(b.category, '') AS category,
+                COUNT(*) AS cnt
+         FROM loans l
+         LEFT JOIN books b ON l.book_id = b.id
+         WHERE length(l.borrow_date) >= 7
+           AND (?1 = '' OR substr(l.borrow_date, 1, 10) >= ?1)
+           AND (?2 = '' OR substr(l.borrow_date, 1, 10) <= ?2)
+         GROUP BY l.book_id
+         ORDER BY cnt DESC, l.book_id ASC
+         LIMIT ?3"
+    )?;
+
+    let book_rankings: Vec<BookBorrowRank> = book_stmt.query_map(params![start, end, effective_limit], |r| {
+        Ok(BookBorrowRank {
+            book_id: r.get(0)?,
+            title: r.get(1)?,
+            author: r.get(2)?,
+            category: r.get(3)?,
+            borrow_count: r.get(4)?,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+
+    Ok(RangeStatsReport {
+        start_date: start.to_string(),
+        end_date: end.to_string(),
+        limit,
+        total_visits,
+        total_books,
+        monthly_stats,
+        reader_rankings,
+        book_rankings,
+    })
+}
+
+fn fill_missing_months(raw: &[MonthlyBorrowStat], start: &str, end: &str) -> Vec<MonthlyBorrowStat> {
+    if start.len() < 7 || end.len() < 7 {
+        return raw.to_vec();
+    }
+    let parse_ym = |s: &str| -> Option<(i32, u32)> {
+        let y: i32 = s.get(0..4)?.parse().ok()?;
+        let m: u32 = s.get(5..7)?.parse().ok()?;
+        if (1..=12).contains(&m) { Some((y, m)) } else { None }
+    };
+
+    let (Some((sy, sm)), Some((ey, em))) = (parse_ym(start), parse_ym(end)) else {
+        return raw.to_vec();
+    };
+
+    let start_idx = sy * 12 + (sm as i32 - 1);
+    let end_idx = ey * 12 + (em as i32 - 1);
+    if end_idx < start_idx || (end_idx - start_idx) > 60 {
+        return raw.to_vec();
+    }
+
+    let mut map = std::collections::HashMap::new();
+    for item in raw {
+        map.insert(item.month.as_str(), item);
+    }
+
+    let mut result = Vec::with_capacity((end_idx - start_idx + 1) as usize);
+    for idx in start_idx..=end_idx {
+        let y = idx.div_euclid(12);
+        let m = idx.rem_euclid(12) + 1;
+        let ym = format!("{:04}-{:02}", y, m);
+        if let Some(existing) = map.get(ym.as_str()) {
+            result.push((*existing).clone());
+        } else {
+            result.push(MonthlyBorrowStat {
+                month: ym,
+                borrow_visits: 0,
+                borrow_books: 0,
+            });
+        }
+    }
+    result
+}
+
 // === 設定項目 ===
 
 pub fn get_setting(db: &DbPool, key: &str, default_val: &str) -> String {
@@ -1736,5 +2061,93 @@ mod tests {
         assert_eq!(check_updated.title, "第一本書(新版)");
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_auto_migration_from_legacy_db() {
+        let temp_dir = std::env::temp_dir().join(format!("test_migrate_{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("library.db");
+
+        // 1. 模擬非常舊版的資料庫：缺少 users/sessions/settings 資料表，也缺少多個後續新增欄位，且日期含斜線
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE roles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL
+                );
+                CREATE TABLE readers (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    role_id TEXT NOT NULL
+                );
+                CREATE TABLE books (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL
+                );
+                CREATE TABLE loans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id TEXT NOT NULL,
+                    reader_id TEXT NOT NULL,
+                    borrow_date TEXT NOT NULL,
+                    due_date TEXT NOT NULL
+                );
+                INSERT INTO roles (id, name) VALUES ('01', '舊版讀者');
+                INSERT INTO readers (id, name, role_id) VALUES ('R001', '張三', '01');
+                INSERT INTO books (id, title) VALUES ('B001', '舊版測試書');
+                INSERT INTO loans (book_id, reader_id, borrow_date, due_date)
+                    VALUES ('B001', 'R001', '2025/05/01', '2025/05/15');
+                "
+            ).unwrap();
+        }
+
+        // 2. 以最新版 init_db 開啟舊資料庫，應自動備份、補齊欄位/資料表/索引、正規化日期
+        let pool = init_db(&db_path).unwrap();
+
+        // 驗證升級前已建立自動備份檔
+        let backups: Vec<_> = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak_v0_to_v"))
+            .collect();
+        assert_eq!(backups.len(), 1, "升級舊資料庫前應自動建立 1 份備份檔");
+
+        // 驗證 PRAGMA user_version 與 schema_migrations
+        {
+            let conn = pool.lock().unwrap();
+            let ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(ver, CURRENT_SCHEMA_VERSION);
+            let mig_count: i64 = conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0)).unwrap();
+            assert_eq!(mig_count, 2);
+        }
+
+        // 驗證舊資料完整保留，且所有新版查詢函式皆能正常讀取
+        let reader = get_reader_by_id(&pool, "R001").unwrap().unwrap();
+        assert_eq!(reader.name, "張三");
+        assert_eq!(reader.status, "active");
+
+        let book = get_book_by_id(&pool, "B001").unwrap().unwrap();
+        assert_eq!(book.title, "舊版測試書");
+        assert_eq!(book.enrichment_status, "none");
+
+        // 驗證斜線日期已正規化為 YYYY-MM-DD，且統計報表正常計算
+        let report = get_range_stats_report(&pool, Some("2025-05-01"), Some("2025-05-31"), 10).unwrap();
+        assert_eq!(report.total_books, 1);
+        assert_eq!(report.total_visits, 1);
+        assert_eq!(report.monthly_stats[0].month, "2025-05");
+
+        // 3. 再次以 init_db 開啟已升級之資料庫，應具冪等性且不會重複產生備份檔
+        drop(pool);
+        let _pool2 = init_db(&db_path).unwrap();
+        let backups_after: Vec<_> = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak_v"))
+            .collect();
+        assert_eq!(backups_after.len(), 1, "已升級資料庫重新開啟時不應重複備份");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

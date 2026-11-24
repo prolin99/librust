@@ -4,6 +4,7 @@
 *.db-shm
 *.db-wal
 library.db
+library.db.bak*
 library.port
 *.zip
 *.exe
