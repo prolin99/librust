@@ -8,7 +8,7 @@ use crate::legacy::{read_dbf, format_dbf_date};
 pub type DbPool = Arc<Mutex<Connection>>;
 
 /// 目前資料庫結構版本號；未來每當資料表或欄位有異動時遞增，並於 `run_migrations` 加入對應升級步驟
-pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+pub const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 /// 檢查指定資料表是否已存在某欄位
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -174,6 +174,73 @@ fn run_migrations(conn: &mut Connection, path: &Path, existed_with_data: bool) -
         current_ver = 2;
     }
 
+    if current_ver < 3 {
+        let tx = conn.transaction()?;
+        // v0.10 升級：建立在借書籍索引，並自動從同層 data/ 舊版 DBF 補齊空白之讀者備註 (Dbf02.NOTE) 與書籍分類號 (Dbf03.ID2)
+        tx.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_loans_active_book ON loans(status, book_id);
+            "
+        )?;
+
+        if let Some(parent_dir) = path.parent() {
+            let data_dir = parent_dir.join("data");
+
+            let dbf02_path = data_dir.join("Dbf02.DBF");
+            if dbf02_path.exists() {
+                if let Ok(table) = read_dbf(&dbf02_path) {
+                    let mut updated_notes = 0usize;
+                    for rec in table.records {
+                        let id = rec.get("ID").cloned().unwrap_or_default();
+                        let note = rec.get("NOTE").cloned().unwrap_or_default();
+                        if !id.is_empty() && !note.is_empty() {
+                            if let Ok(n) = tx.execute(
+                                "UPDATE readers SET note = ?2 WHERE id = ?1 AND (note IS NULL OR note = '')",
+                                params![id, note],
+                            ) {
+                                updated_notes += n;
+                            }
+                        }
+                    }
+                    if updated_notes > 0 {
+                        println!("[↑] 資料庫自動升級 (v0.10)：已從 Dbf02.DBF 補齊 {} 筆讀者備註", updated_notes);
+                    }
+                }
+            }
+
+            let dbf03_path = data_dir.join("Dbf03.DBF");
+            if dbf03_path.exists() {
+                if let Ok(table) = read_dbf(&dbf03_path) {
+                    let mut updated_cats = 0usize;
+                    for rec in table.records {
+                        let id = rec.get("ID").cloned().unwrap_or_default();
+                        let id2 = rec.get("ID2").cloned().unwrap_or_default();
+                        if !id.is_empty() && !id2.is_empty() {
+                            if let Ok(n) = tx.execute(
+                                "UPDATE books SET category = ?2 WHERE id = ?1 AND (category IS NULL OR category = '')",
+                                params![id, id2],
+                            ) {
+                                updated_cats += n;
+                            }
+                        }
+                    }
+                    if updated_cats > 0 {
+                        println!("[↑] 資料庫自動升級 (v0.10)：已從 Dbf03.DBF (ID2) 補齊 {} 筆書籍分類號", updated_cats);
+                    }
+                }
+            }
+        }
+
+        let now = Local::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations (version, description, applied_at) VALUES (3, ?1, ?2)",
+            params!["v0.10 在借書籍索引建立與舊版 DBF 讀者備註/書籍分類號(ID2)自動補齊", now],
+        )?;
+        tx.pragma_update(None, "user_version", 3i32)?;
+        tx.commit()?;
+        current_ver = 3;
+    }
+
     let _ = current_ver;
     Ok(())
 }
@@ -301,13 +368,40 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
     Ok(Arc::new(Mutex::new(conn)))
 }
 
-pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<String, String> {
-    let conn = db.lock().unwrap();
+pub fn import_legacy_data(
+    db: &DbPool,
+    data_dir: &Path,
+    clear_existing: bool,
+) -> std::result::Result<String, String> {
+    if !data_dir.exists() {
+        return Err(format!("找不到舊系統資料目錄：{}", data_dir.display()));
+    }
+
+    println!("[⏳] 開始讀取舊版 DBF 檔案並寫入資料庫，資料量較大時請耐心等待...");
+    let mut conn = db.lock().unwrap();
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("啟動移轉交易失敗: {}", e))?;
     let mut summary = Vec::new();
+
+    if clear_existing {
+        println!("[-] 正在清除現有借閱紀錄、書籍、讀者與身分別資料...");
+        tx.execute("DELETE FROM loans", [])
+            .map_err(|e| format!("清除借閱紀錄失敗: {}", e))?;
+        tx.execute("DELETE FROM books", [])
+            .map_err(|e| format!("清除書籍資料失敗: {}", e))?;
+        tx.execute("DELETE FROM readers", [])
+            .map_err(|e| format!("清除讀者資料失敗: {}", e))?;
+        tx.execute("DELETE FROM roles", [])
+            .map_err(|e| format!("清除身分別資料失敗: {}", e))?;
+        let _ = tx.execute("DELETE FROM sqlite_sequence WHERE name = 'loans'", []);
+        summary.push("已清除原有資料".to_string());
+    }
 
     // 1. 身分別 DBF01.DBF
     let dbf01_path = data_dir.join("DBF01.DBF");
     if dbf01_path.exists() {
+        println!("[-] 正在讀取 DBF01.DBF（身分別）...");
         if let Ok(table) = read_dbf(&dbf01_path) {
             let mut count = 0;
             for rec in table.records {
@@ -319,7 +413,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
                 let note = rec.get("NOTE").cloned().unwrap_or_default();
 
                 if !id.is_empty() && !name.is_empty() {
-                    let _ = conn.execute(
+                    let _ = tx.execute(
                         "INSERT OR REPLACE INTO roles (id, name, max_books, borrow_days, renew_days, note)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![id, name, lend_qty, lend_day, if cont_day > 0 { cont_day } else { 7 }, note],
@@ -331,9 +425,9 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
         }
     }
 
-    let role_count: i64 = conn.query_row("SELECT COUNT(*) FROM roles", [], |r| r.get(0)).unwrap_or(0);
+    let role_count: i64 = tx.query_row("SELECT COUNT(*) FROM roles", [], |r| r.get(0)).unwrap_or(0);
     if role_count == 0 {
-        let _ = conn.execute(
+        let _ = tx.execute(
             "INSERT INTO roles (id, name, max_books, borrow_days, renew_days, note) VALUES 
              ('01', '一般讀者/服務對象', 2, 30, 14, '預設身分'),
              ('02', '教職員/工作人員', 15, 30, 14, '教師或人員')",
@@ -345,6 +439,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
     // 2. 讀者資料 Dbf02.DBF
     let dbf02_path = data_dir.join("Dbf02.DBF");
     if dbf02_path.exists() {
+        println!("[-] 正在讀取 Dbf02.DBF（讀者資料）...");
         if let Ok(table) = read_dbf(&dbf02_path) {
             let mut count = 0;
             let today = Local::now().format("%Y-%m-%d").to_string();
@@ -362,7 +457,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
                 let status = if state.to_uppercase() == "Y" { "active" } else { "disabled" };
 
                 if !id.is_empty() && !name.is_empty() {
-                    let _ = conn.execute(
+                    let _ = tx.execute(
                         "INSERT OR REPLACE INTO readers (id, name, role_id, class_name, grade, phone, email, status, note, created_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, '', '', ?6, ?7, ?8)",
                         params![id, name, role_id, class_name, grade, status, note, today],
@@ -377,6 +472,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
     // 3. 書籍資料 Dbf03.DBF
     let dbf03_path = data_dir.join("Dbf03.DBF");
     if dbf03_path.exists() {
+        println!("[-] 正在讀取 Dbf03.DBF（書籍資料，請耐心等待）...");
         if let Ok(table) = read_dbf(&dbf03_path) {
             let mut count = 0;
             let today = Local::now().format("%Y-%m-%d").to_string();
@@ -387,14 +483,14 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
                 let publisher = rec.get("PUBLICER").cloned().unwrap_or_default();
                 let pub_year = rec.get("PUB_YEAR").cloned().unwrap_or_default();
                 let isbn = rec.get("ISBN").cloned().unwrap_or_default();
-                let category = rec.get("WHAT").cloned().unwrap_or_default();
+                let category = rec.get("ID2").cloned().unwrap_or_default();
                 let location = rec.get("WHERE").cloned().unwrap_or_default();
                 let price: f64 = rec.get("PRICE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
                 let lend_sum: i32 = rec.get("LEND_SUM").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let note = rec.get("PROPERTY").cloned().unwrap_or_default();
 
                 if !id.is_empty() && !title.is_empty() {
-                    let _ = conn.execute(
+                    let _ = tx.execute(
                         "INSERT OR REPLACE INTO books (id, title, author, publisher, pub_year, isbn, category, location, price, description, cover_url, status, borrow_count, enrichment_status, note, created_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '', '', 'available', ?10, 'none', ?11, ?12)",
                         params![id, title, author, publisher, pub_year, isbn, category, location, price, lend_sum, note, today],
@@ -409,6 +505,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
     // 4. 目前借出 Liborrow.DBF
     let liborrow_path = data_dir.join("Liborrow.DBF");
     if liborrow_path.exists() {
+        println!("[-] 正在讀取 Liborrow.DBF（目前在借記錄）...");
         if let Ok(table) = read_dbf(&liborrow_path) {
             let mut count = 0;
             for rec in table.records {
@@ -418,19 +515,19 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
                 let date2 = format_dbf_date(&rec.get("DATE2").cloned().unwrap_or_default());
 
                 if !reader_id.is_empty() && !book_id.is_empty() {
-                    let _ = conn.execute(
+                    let _ = tx.execute(
                         "UPDATE books SET status = 'borrowed' WHERE id = ?1",
                         params![book_id],
                     );
 
-                    let exists: i64 = conn.query_row(
+                    let exists: i64 = tx.query_row(
                         "SELECT COUNT(*) FROM loans WHERE book_id = ?1 AND reader_id = ?2 AND status = 'active'",
                         params![book_id, reader_id],
                         |r| r.get(0),
                     ).unwrap_or(0);
 
                     if exists == 0 {
-                        let _ = conn.execute(
+                        let _ = tx.execute(
                             "INSERT INTO loans (book_id, reader_id, borrow_date, due_date, status, renew_count, note)
                              VALUES (?1, ?2, ?3, ?4, 'active', 0, '從舊系統匯入在借記錄')",
                             params![book_id, reader_id, date1, date2],
@@ -446,6 +543,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
     // 5. 歷史借還記錄 Liborrow_his.DBF
     let his_path = data_dir.join("Liborrow_his.DBF");
     if his_path.exists() {
+        println!("[-] 正在讀取 Liborrow_his.DBF（歷史借閱記錄，筆數較多請耐心等待）...");
         if let Ok(table) = read_dbf(&his_path) {
             let mut count = 0;
             for rec in table.records {
@@ -456,7 +554,7 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
                 let date3 = format_dbf_date(&rec.get("DATE3").cloned().unwrap_or_default());
 
                 if !reader_id.is_empty() && !book_id.is_empty() {
-                    let _ = conn.execute(
+                    let _ = tx.execute(
                         "INSERT INTO loans (book_id, reader_id, borrow_date, due_date, return_date, status, renew_count, note)
                          VALUES (?1, ?2, ?3, ?4, ?5, 'returned', 0, '歷史借閱記錄')",
                         params![book_id, reader_id, date1, date2, if date3.is_empty() { date2.clone() } else { date3 }],
@@ -467,6 +565,9 @@ pub fn import_legacy_data(db: &DbPool, data_dir: &Path) -> std::result::Result<S
             summary.push(format!("歷史借閱記錄匯入 {} 筆", count));
         }
     }
+
+    tx.commit()
+        .map_err(|e| format!("提交移轉交易失敗: {}", e))?;
 
     Ok(summary.join("，"))
 }
@@ -520,18 +621,8 @@ pub fn delete_role(db: &DbPool, role_id: &str) -> std::result::Result<(), String
 
 pub fn get_readers(db: &DbPool, query: &str) -> Result<Vec<Reader>> {
     let conn = db.lock().unwrap();
-    let q = format!("%{}%", query.trim());
-    let mut stmt = conn.prepare(
-        "SELECT r.id, r.name, r.role_id, ro.name, ro.max_books, ro.borrow_days,
-                r.class_name, r.grade, r.phone, r.email, r.status, r.note, r.created_at,
-                (SELECT COUNT(*) FROM loans l WHERE l.reader_id = r.id AND l.status = 'active') as active_loans
-         FROM readers r
-         LEFT JOIN roles ro ON r.role_id = ro.id
-         WHERE r.id LIKE ?1 OR r.name LIKE ?1 OR r.class_name LIKE ?1 OR ro.name LIKE ?1
-         ORDER BY r.id ASC LIMIT 300"
-    )?;
-
-    let readers = stmt.query_map(params![q], |row| {
+    let trimmed = query.trim();
+    let map_row = |row: &rusqlite::Row<'_>| -> Result<Reader> {
         Ok(Reader {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -548,7 +639,33 @@ pub fn get_readers(db: &DbPool, query: &str) -> Result<Vec<Reader>> {
             created_at: row.get(12)?,
             active_loans_count: row.get(13)?,
         })
-    })?.filter_map(|r| r.ok()).collect();
+    };
+
+    let readers = if trimmed.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.name, r.role_id, ro.name, ro.max_books, ro.borrow_days,
+                    r.class_name, r.grade, r.phone, r.email, r.status, r.note, r.created_at,
+                    (SELECT COUNT(*) FROM loans l WHERE l.reader_id = r.id AND l.status = 'active') as active_loans
+             FROM readers r
+             LEFT JOIN roles ro ON r.role_id = ro.id
+             ORDER BY r.id ASC"
+        )?;
+        let rows: Vec<Reader> = stmt.query_map([], map_row)?.filter_map(|r| r.ok()).collect();
+        rows
+    } else {
+        let q = format!("%{}%", trimmed);
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.name, r.role_id, ro.name, ro.max_books, ro.borrow_days,
+                    r.class_name, r.grade, r.phone, r.email, r.status, r.note, r.created_at,
+                    (SELECT COUNT(*) FROM loans l WHERE l.reader_id = r.id AND l.status = 'active') as active_loans
+             FROM readers r
+             LEFT JOIN roles ro ON r.role_id = ro.id
+             WHERE r.id LIKE ?1 OR r.name LIKE ?1 OR r.class_name LIKE ?1 OR ro.name LIKE ?1 OR r.note LIKE ?1
+             ORDER BY r.id ASC"
+        )?;
+        let rows: Vec<Reader> = stmt.query_map(params![q], map_row)?.filter_map(|r| r.ok()).collect();
+        rows
+    };
 
     Ok(readers)
 }
@@ -781,31 +898,15 @@ pub fn get_next_book_id(db: &DbPool) -> std::result::Result<String, String> {
 
 pub fn get_books(db: &DbPool, query: &str, status_filter: &str) -> Result<Vec<Book>> {
     let conn = db.lock().unwrap();
-    let q = format!("%{}%", query.trim());
-    let status_clause = match status_filter {
-        "available" => " AND b.status = 'available'",
-        "borrowed" => " AND b.status = 'borrowed'",
-        _ => "",
+    let trimmed = query.trim();
+    let status_cond = match status_filter {
+        "available" => Some("b.status = 'available'"),
+        "borrowed" => Some("b.status = 'borrowed'"),
+        _ => None,
     };
 
-    let sql = format!(
-        "SELECT b.id, b.title, b.author, b.publisher, b.pub_year, b.isbn, b.category,
-                b.location, b.price, b.description, b.cover_url, b.status, b.borrow_count,
-                b.enrichment_status, b.note, b.created_at,
-                l.id, l.reader_id, r.name, l.borrow_date, l.due_date
-         FROM books b
-         LEFT JOIN loans l ON b.id = l.book_id AND l.status = 'active'
-         LEFT JOIN readers r ON l.reader_id = r.id
-         WHERE (b.id LIKE ?1 OR b.title LIKE ?1 OR b.author LIKE ?1 OR b.isbn LIKE ?1 OR b.category LIKE ?1)
-         {}
-         ORDER BY b.id ASC LIMIT 300",
-        status_clause
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
     let today = Local::now().naive_local().date();
-
-    let books = stmt.query_map(params![q], |row| {
+    let map_row = |row: &rusqlite::Row<'_>| -> Result<Book> {
         let loan_id: Option<i64> = row.get(16)?;
         let current_borrower = if let Some(lid) = loan_id {
             let rid: String = row.get(17)?;
@@ -849,7 +950,51 @@ pub fn get_books(db: &DbPool, query: &str, status_filter: &str) -> Result<Vec<Bo
             created_at: row.get(15)?,
             current_borrower,
         })
-    })?.filter_map(|b| b.ok()).collect();
+    };
+
+    let books = if trimmed.is_empty() {
+        let where_clause = match status_cond {
+            Some(c) => format!("WHERE {}", c),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT b.id, b.title, b.author, b.publisher, b.pub_year, b.isbn, b.category,
+                    b.location, b.price, b.description, b.cover_url, b.status, b.borrow_count,
+                    b.enrichment_status, b.note, b.created_at,
+                    l.id, l.reader_id, r.name, l.borrow_date, l.due_date
+             FROM books b
+             LEFT JOIN loans l ON b.id = l.book_id AND l.status = 'active'
+             LEFT JOIN readers r ON l.reader_id = r.id
+             {}
+             ORDER BY b.id ASC",
+            where_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<Book> = stmt.query_map([], map_row)?.filter_map(|b| b.ok()).collect();
+        rows
+    } else {
+        let q = format!("%{}%", trimmed);
+        let status_clause = match status_cond {
+            Some(c) => format!(" AND {}", c),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT b.id, b.title, b.author, b.publisher, b.pub_year, b.isbn, b.category,
+                    b.location, b.price, b.description, b.cover_url, b.status, b.borrow_count,
+                    b.enrichment_status, b.note, b.created_at,
+                    l.id, l.reader_id, r.name, l.borrow_date, l.due_date
+             FROM books b
+             LEFT JOIN loans l ON b.id = l.book_id AND l.status = 'active'
+             LEFT JOIN readers r ON l.reader_id = r.id
+             WHERE (b.id LIKE ?1 OR b.title LIKE ?1 OR b.author LIKE ?1 OR b.isbn LIKE ?1 OR b.category LIKE ?1)
+             {}
+             ORDER BY b.id ASC",
+            status_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<Book> = stmt.query_map(params![q], map_row)?.filter_map(|b| b.ok()).collect();
+        rows
+    };
 
     Ok(books)
 }
@@ -2120,7 +2265,7 @@ mod tests {
             let ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
             assert_eq!(ver, CURRENT_SCHEMA_VERSION);
             let mig_count: i64 = conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0)).unwrap();
-            assert_eq!(mig_count, 2);
+            assert_eq!(mig_count, CURRENT_SCHEMA_VERSION as i64);
         }
 
         // 驗證舊資料完整保留，且所有新版查詢函式皆能正常讀取

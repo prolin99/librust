@@ -261,7 +261,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
               <option value="20" selected>20 筆</option>
               <option value="50">50 筆</option>
               <option value="100">100 筆</option>
-              <option value="0">全部顯示</option>
+              <option value="200">200 筆</option>
             </select>
             <span id="active-loans-page-summary" style="color: var(--text-muted); margin-left: 0.5rem;">載入中...</span>
           </div>
@@ -338,14 +338,16 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
               <option value="20" selected>20 筆</option>
               <option value="50">50 筆</option>
               <option value="100">100 筆</option>
-              <option value="0">全部顯示</option>
+              <option value="200">200 筆</option>
             </select>
             <span id="books-page-summary" style="color: var(--text-muted); margin-left: 0.5rem;">載入中...</span>
           </div>
           <div style="display: flex; align-items: center; gap: 0.35rem;">
             <button class="btn btn-outline btn-sm" id="btn-books-first" onclick="gotoBooksPage(1)">⏮ 首頁</button>
             <button class="btn btn-outline btn-sm" id="btn-books-prev" onclick="prevBooksPage()">◀ 上一頁</button>
-            <span id="books-page-indicator" style="font-weight: 600; padding: 0 0.5rem;">第 1 / 1 頁</span>
+            <select id="books-page-indicator" aria-label="選擇書籍頁次" style="width: auto; min-width: 110px; padding: 0.25rem 0.5rem; font-size: 0.85rem; font-weight: 600;" onchange="gotoBooksPage(parseInt(this.value, 10))">
+              <option value="1">第 1 / 1 頁</option>
+            </select>
             <button class="btn btn-outline btn-sm" id="btn-books-next" onclick="nextBooksPage()">下一頁 ▶</button>
             <button class="btn btn-outline btn-sm" id="btn-books-last" onclick="gotoBooksLastPage()">末頁 ⏭</button>
           </div>
@@ -378,7 +380,9 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <div style="display: flex; align-items: center; gap: 0.35rem;">
             <button class="btn btn-outline btn-sm" onclick="gotoBooksPage(1)">⏮ 首頁</button>
             <button class="btn btn-outline btn-sm" onclick="prevBooksPage()">◀ 上一頁</button>
-            <span id="books-page-indicator-bottom" style="font-weight: 600; padding: 0 0.5rem;">第 1 / 1 頁</span>
+            <select id="books-page-indicator-bottom" aria-label="選擇書籍頁次" style="width: auto; min-width: 110px; padding: 0.25rem 0.5rem; font-size: 0.85rem; font-weight: 600;" onchange="gotoBooksPage(parseInt(this.value, 10))">
+              <option value="1">第 1 / 1 頁</option>
+            </select>
             <button class="btn btn-outline btn-sm" onclick="nextBooksPage()">下一頁 ▶</button>
             <button class="btn btn-outline btn-sm" onclick="gotoBooksLastPage()">末頁 ⏭</button>
           </div>
@@ -391,7 +395,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;">
           <div style="display: flex; gap: 0.5rem; flex: 1; max-width: 400px;">
-            <input type="text" id="readers-search" placeholder="搜尋讀者姓名、證號、班級..." onkeydown="if(event.key==='Enter') loadReaders()">
+            <input type="text" id="readers-search" placeholder="搜尋讀者姓名、證號、班級、備註..." onkeydown="if(event.key==='Enter') loadReaders()">
             <button class="btn btn-primary" onclick="loadReaders()">搜尋</button>
           </div>
           <div style="display: flex; gap: 0.5rem;">
@@ -412,14 +416,16 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
               <option value="20" selected>20 筆</option>
               <option value="50">50 筆</option>
               <option value="100">100 筆</option>
-              <option value="0">全部顯示</option>
+              <option value="200">200 筆</option>
             </select>
             <span id="readers-page-summary" style="color: var(--text-muted); margin-left: 0.5rem;">載入中...</span>
           </div>
           <div style="display: flex; align-items: center; gap: 0.35rem;">
             <button class="btn btn-outline btn-sm" id="btn-readers-first" onclick="gotoReadersPage(1)">⏮ 首頁</button>
             <button class="btn btn-outline btn-sm" id="btn-readers-prev" onclick="prevReadersPage()">◀ 上一頁</button>
-            <span id="readers-page-indicator" style="font-weight: 600; padding: 0 0.5rem;">第 1 / 1 頁</span>
+            <select id="readers-page-indicator" aria-label="選擇讀者頁次" style="width: auto; min-width: 110px; padding: 0.25rem 0.5rem; font-size: 0.85rem; font-weight: 600;" onchange="gotoReadersPage(parseInt(this.value, 10))">
+              <option value="1">第 1 / 1 頁</option>
+            </select>
             <button class="btn btn-outline btn-sm" id="btn-readers-next" onclick="nextReadersPage()">下一頁 ▶</button>
             <button class="btn btn-outline btn-sm" id="btn-readers-last" onclick="gotoReadersLastPage()">末頁 ⏭</button>
           </div>
@@ -437,6 +443,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
                 <th>班級/單位</th>
                 <th>目前借閱</th>
                 <th>狀態</th>
+                <th>備註</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -450,7 +457,9 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <div style="display: flex; align-items: center; gap: 0.35rem;">
             <button class="btn btn-outline btn-sm" onclick="gotoReadersPage(1)">⏮ 首頁</button>
             <button class="btn btn-outline btn-sm" onclick="prevReadersPage()">◀ 上一頁</button>
-            <span id="readers-page-indicator-bottom" style="font-weight: 600; padding: 0 0.5rem;">第 1 / 1 頁</span>
+            <select id="readers-page-indicator-bottom" aria-label="選擇讀者頁次" style="width: auto; min-width: 110px; padding: 0.25rem 0.5rem; font-size: 0.85rem; font-weight: 600;" onchange="gotoReadersPage(parseInt(this.value, 10))">
+              <option value="1">第 1 / 1 頁</option>
+            </select>
             <button class="btn btn-outline btn-sm" onclick="nextReadersPage()">下一頁 ▶</button>
             <button class="btn btn-outline btn-sm" onclick="gotoReadersLastPage()">末頁 ⏭</button>
           </div>
@@ -814,11 +823,29 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
 
         <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
 
-        <h3 style="color: var(--danger); margin-bottom: 0.5rem;">🔄 從舊系統重新移轉資料</h3>
-        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
-          讀取本機 data/ 目錄下的 DBF01, Dbf02, Dbf03, Liborrow 等檔案並覆蓋匯入。
+        <h3 style="margin-bottom: 0.5rem;">🚀 系統版本與線上自動更新</h3>
+        <p id="settings-update-info" style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.85rem;">
+          目前版本：<code>v0.10</code>（正在檢查 GitHub Releases 是否有新版...）
         </p>
-        <button class="btn btn-outline" style="color: var(--danger); border-color: var(--danger);" onclick="triggerLegacyImport()">重新讀取 data/ 舊資料庫</button>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+          <button type="button" class="btn btn-outline" onclick="checkForUpdates(true)">🔍 檢查新版</button>
+          <button type="button" id="btn-apply-update-settings" class="btn btn-primary" style="display: none;" onclick="applySystemUpdate()">⬇️ 一鍵下載並更新</button>
+        </div>
+        <div id="apply-update-status" style="display: none; margin-top: 0.75rem; padding: 0.75rem 1rem; border-radius: 0.375rem; font-size: 0.9rem;"></div>
+
+        <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
+
+        <h3 style="color: var(--danger); margin-bottom: 0.5rem;">🔄 從舊系統重新移轉資料</h3>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
+          讀取本機 <code>data/</code> 目錄下的 DBF01、Dbf02、Dbf03、Liborrow 等舊版 DBF 檔案並匯入。<br>
+          ⏳ <strong>提醒：</strong>若舊版 DBF 檔案（含書籍與歷史借閱紀錄）資料量較大，讀取與移轉可能需要數十秒至數分鐘，執行期間請耐心等待，切勿關閉視窗或重新整理頁面。
+        </p>
+        <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem; font-size: 0.9rem; cursor: pointer;">
+          <input type="checkbox" id="legacy-import-clear-existing" checked style="width: auto; cursor: pointer;">
+          <span>移轉前先清除目前已存在的資料（讀者、書籍、借閱紀錄、身分別），避免歷史借閱等資料重複累增</span>
+        </label>
+        <button id="btn-legacy-import" class="btn btn-outline" style="color: var(--danger); border-color: var(--danger);" onclick="triggerLegacyImport()">重新讀取 data/ 舊資料庫</button>
+        <div id="legacy-import-status" style="display: none; margin-top: 0.75rem; padding: 0.75rem 1rem; border-radius: 0.375rem; font-size: 0.9rem;"></div>
       </div>
     </section>
   </main>
@@ -829,7 +856,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.9</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.10</code></span>
         <span style="color: #475569;">|</span>
         <a id="github-releases-link" href="https://github.com/prolin99/librust/releases" target="_blank" rel="noopener noreferrer" title="前往 GitHub Releases 下載頁面" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
@@ -840,6 +867,9 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
         <a id="update-notify-badge" href="https://github.com/prolin99/librust/releases" target="_blank" rel="noopener noreferrer" title="點擊前往下載最新版本" style="display: none; align-items: center; gap: 0.3rem; background: #f59e0b; color: #0f172a; padding: 0.15rem 0.55rem; border-radius: 9999px; font-size: 0.78rem; font-weight: 700; text-decoration: none; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.35);">
           <span>🔔 發現新版</span>
         </a>
+        <button id="btn-apply-update-footer" type="button" onclick="applySystemUpdate()" style="display: none; align-items: center; gap: 0.3rem; background: #10b981; color: #ffffff; border: none; padding: 0.2rem 0.65rem; border-radius: 9999px; font-size: 0.78rem; font-weight: 700; cursor: pointer;">
+          <span>⬇️ 一鍵自動更新</span>
+        </button>
       </div>
       <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
         <span>製作者：</span>
@@ -961,6 +991,10 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <option value="active">正常 (啟用)</option>
           <option value="disabled">停用</option>
         </select>
+      </div>
+      <div style="margin-bottom: 0.75rem;">
+        <label style="font-size: 0.85rem; font-weight: 600;">備註</label>
+        <input type="text" id="rm-note" placeholder="選填，例如退證紀錄或特殊說明">
       </div>
       <input type="hidden" id="rm-created-at">
       <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem;">
@@ -1365,7 +1399,8 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
     }
 
     function changeActiveLoansPageSize(val) {
-      activeLoansPageSize = parseInt(val) || 0;
+      const parsed = parseInt(val, 10);
+      activeLoansPageSize = Math.min(200, Math.max(1, Number.isNaN(parsed) || parsed <= 0 ? 20 : parsed));
       activeLoansCurrentPage = 1;
       renderActiveLoansTable();
     }
@@ -1520,7 +1555,8 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
     }
 
     function changeBooksPageSize(val) {
-      booksPageSize = parseInt(val) || 0;
+      const parsed = parseInt(val, 10);
+      booksPageSize = Math.min(200, Math.max(1, Number.isNaN(parsed) || parsed <= 0 ? 20 : parsed));
       booksCurrentPage = 1;
       renderBooksTable();
     }
@@ -1550,6 +1586,24 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       const totalPages = booksPageSize === 0 ? 1 : Math.max(1, Math.ceil(booksAllList.length / booksPageSize));
       booksCurrentPage = totalPages;
       renderBooksTable();
+    }
+
+    function updatePageJumpSelect(selectEl, currentPage, totalPages) {
+      if (!selectEl) return;
+      const tp = Math.max(1, totalPages);
+      if (selectEl.dataset.totalPages !== String(tp)) {
+        const frag = document.createDocumentFragment();
+        for (let p = 1; p <= tp; p++) {
+          const opt = document.createElement('option');
+          opt.value = String(p);
+          opt.textContent = `第 ${p} / ${tp} 頁`;
+          frag.appendChild(opt);
+        }
+        selectEl.innerHTML = '';
+        selectEl.appendChild(frag);
+        selectEl.dataset.totalPages = String(tp);
+      }
+      selectEl.value = String(Math.max(1, Math.min(currentPage, tp)));
     }
 
     function renderBooksTable() {
@@ -1583,9 +1637,9 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       if (sumBtm) sumBtm.textContent = summaryText;
 
       const indTop = document.getElementById('books-page-indicator');
-      if (indTop) indTop.textContent = pageIndicatorText;
+      updatePageJumpSelect(indTop, booksCurrentPage, totalPages);
       const indBtm = document.getElementById('books-page-indicator-bottom');
-      if (indBtm) indBtm.textContent = pageIndicatorText;
+      updatePageJumpSelect(indBtm, booksCurrentPage, totalPages);
 
       // 按鈕啟用/停用狀態
       const btnFirst = document.getElementById('btn-books-first');
@@ -1886,7 +1940,8 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
     }
 
     function changeReadersPageSize(val) {
-      readersPageSize = parseInt(val) || 0;
+      const parsed = parseInt(val, 10);
+      readersPageSize = Math.min(200, Math.max(1, Number.isNaN(parsed) || parsed <= 0 ? 20 : parsed));
       readersCurrentPage = 1;
       renderReadersTable();
     }
@@ -1948,9 +2003,9 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       if (sumBtm) sumBtm.textContent = summaryText;
 
       const indTop = document.getElementById('readers-page-indicator');
-      if (indTop) indTop.textContent = pageIndicatorText;
+      updatePageJumpSelect(indTop, readersCurrentPage, totalPages);
       const indBtm = document.getElementById('readers-page-indicator-bottom');
-      if (indBtm) indBtm.textContent = pageIndicatorText;
+      updatePageJumpSelect(indBtm, readersCurrentPage, totalPages);
 
       const btnFirst = document.getElementById('btn-readers-first');
       const btnPrev = document.getElementById('btn-readers-prev');
@@ -1966,7 +2021,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       tbody.innerHTML = '';
 
       if (displayList.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 2.5rem;">無符合搜尋條件之讀者資料</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 2.5rem;">無符合搜尋條件之讀者資料</td></tr>';
         return;
       }
 
@@ -1985,6 +2040,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <td>${escapeHtml(r.class_name || '-')}</td>
           <td>${r.active_loans_count || 0} 本</td>
           <td>${statusBadge}</td>
+          <td style="max-width: 180px; color: var(--text-muted); font-size: 0.85rem;">${escapeHtml(r.note || '-')}</td>
           <td>
             <button class="btn btn-outline btn-sm" onclick='editReader(${JSON.stringify(r)})'>編輯</button>
             <button class="btn btn-outline btn-sm" style="color: var(--danger);" onclick="deleteReader('${r.id}')">刪除</button>
@@ -2026,6 +2082,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       document.getElementById('rm-phone').value = reader ? reader.phone : '';
       document.getElementById('rm-email').value = reader ? reader.email : '';
       document.getElementById('rm-status').value = reader ? reader.status : 'active';
+      document.getElementById('rm-note').value = reader ? (reader.note || '') : '';
       document.getElementById('rm-created-at').value = reader ? reader.created_at : '';
       loadRolesForSelect(reader ? reader.role_id : '01');
 
@@ -2053,7 +2110,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
         phone: document.getElementById('rm-phone').value.trim(),
         email: document.getElementById('rm-email').value.trim(),
         status: document.getElementById('rm-status').value,
-        note: '',
+        note: document.getElementById('rm-note').value.trim(),
         created_at: document.getElementById('rm-created-at').value,
         active_loans_count: 0,
       };
@@ -2898,11 +2955,64 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
     }
 
     async function triggerLegacyImport() {
-      if (!confirm('確定要重新讀取 data/ 目錄下的 DBF 舊資料庫嗎？')) return;
-      const res = await fetch('/api/system/import-legacy', { method: 'POST' });
-      const data = await res.json();
-      alert(data.message);
-      loadStats();
+      const clearCheckbox = document.getElementById('legacy-import-clear-existing');
+      const clearExisting = clearCheckbox ? clearCheckbox.checked : false;
+      const modeHint = clearExisting
+        ? '【先清除目前所有讀者、書籍、借閱紀錄與身分別，再重新匯入】'
+        : '【保留現有資料並覆蓋／附加匯入（注意：歷史借閱紀錄可能會重複累增）】';
+      if (!confirm(`確定要重新讀取 data/ 目錄下的 DBF 舊資料庫嗎？\n\n本次模式：${modeHint}\n\n⏳ 讀取與移轉可能需要數十秒至數分鐘，請耐心等待，期間切勿關閉視窗。`)) return;
+
+      const btn = document.getElementById('btn-legacy-import');
+      const statusEl = document.getElementById('legacy-import-status');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ 正在讀取舊版 DBF 並移轉資料中，請耐心等待...';
+      }
+      if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.style.background = '#fef3c7';
+        statusEl.style.color = '#92400e';
+        statusEl.style.border = '1px solid #f59e0b';
+        statusEl.textContent = '⏳ 正在讀取 data/ 舊版 DBF 檔案並寫入資料庫，資料量較大時可能需要數十秒至數分鐘，請耐心等待，切勿關閉視窗或重新整理頁面...';
+      }
+
+      try {
+        const res = await fetch('/api/system/import-legacy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clear_existing: clearExisting }),
+        });
+        const data = await res.json();
+        if (statusEl) {
+          if (data.success) {
+            statusEl.style.background = '#dcfce7';
+            statusEl.style.color = '#15803d';
+            statusEl.style.border = '1px solid #86efac';
+            statusEl.textContent = `✅ ${data.message}`;
+          } else {
+            statusEl.style.background = '#fee2e2';
+            statusEl.style.color = '#b91c1c';
+            statusEl.style.border = '1px solid #f87171';
+            statusEl.textContent = `❌ ${data.message}`;
+          }
+        }
+        alert(data.message);
+        loadStats();
+      } catch (e) {
+        const errMsg = '移轉過程發生連線錯誤：' + e.message;
+        if (statusEl) {
+          statusEl.style.background = '#fee2e2';
+          statusEl.style.color = '#b91c1c';
+          statusEl.style.border = '1px solid #f87171';
+          statusEl.textContent = `❌ ${errMsg}`;
+        }
+        alert(errMsg);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '重新讀取 data/ 舊資料庫';
+        }
+      }
     }
 
     // === 登入與身分認證控制 ===
@@ -3002,22 +3112,159 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       `;
     }
 
+    let latestUpdateInfo = null;
+
     // 檢查 GitHub 是否有新版本發布
-    async function checkForUpdates() {
+    async function checkForUpdates(manual = false) {
+      const infoEl = document.getElementById('settings-update-info');
+      if (manual && infoEl) {
+        infoEl.textContent = '⏳ 正在向 GitHub Releases 查詢最新版本...';
+      }
       try {
-        const res = await fetch('/api/system/check-update');
+        const url = manual ? '/api/system/check-update?force=1' : '/api/system/check-update';
+        const res = await fetch(url);
         const data = await res.json();
-        if (data.success && data.data && data.data.has_update) {
+        if (data.success && data.data) {
+          const info = data.data;
+          latestUpdateInfo = info;
           const badge = document.getElementById('update-notify-badge');
-          if (badge) {
-            const latest = data.data.latest_version || '新版';
-            badge.href = data.data.release_url || 'https://github.com/prolin99/librust/releases';
-            badge.innerHTML = `<span>🔔 發現新版 ${escapeHtml(latest)}！前往更新</span>`;
-            badge.style.display = 'inline-flex';
+          const footerBtn = document.getElementById('btn-apply-update-footer');
+          const settingsBtn = document.getElementById('btn-apply-update-settings');
+
+          if (info.has_update) {
+            const latest = info.latest_version || '新版';
+            if (badge) {
+              badge.href = info.release_url || 'https://github.com/prolin99/librust/releases';
+              badge.innerHTML = `<span>🔔 發現新版 ${escapeHtml(latest)}</span>`;
+              badge.style.display = 'inline-flex';
+            }
+            if (info.download_url) {
+              const sizeMb = info.asset_size ? ` (${(info.asset_size / (1024 * 1024)).toFixed(1)} MB)` : '';
+              if (footerBtn) {
+                footerBtn.innerHTML = `<span>⬇️ 一鍵更新至 ${escapeHtml(latest)}</span>`;
+                footerBtn.style.display = 'inline-flex';
+              }
+              if (settingsBtn) {
+                settingsBtn.textContent = `⬇️ 一鍵下載並更新至 ${latest}${sizeMb}`;
+                settingsBtn.style.display = 'inline-flex';
+              }
+              if (infoEl) {
+                infoEl.innerHTML = `目前版本：<code>v${escapeHtml(info.current_version)}</code> ｜ 發現新版：<strong>${escapeHtml(latest)}</strong>（附件 <code>${escapeHtml(info.asset_name || 'LibRust.exe')}</code>${sizeMb}），可直接一鍵下載更新並重啟。`;
+              }
+            } else if (infoEl) {
+              infoEl.innerHTML = `目前版本：<code>v${escapeHtml(info.current_version)}</code> ｜ 發現新版：<strong>${escapeHtml(latest)}</strong>（此版本尚未附上 .exe 檔案，請至 <a href="${escapeHtml(info.release_url)}" target="_blank" rel="noopener noreferrer">GitHub Releases</a> 手動下載）。`;
+            }
+          } else {
+            if (footerBtn) footerBtn.style.display = 'none';
+            if (settingsBtn) settingsBtn.style.display = 'none';
+            if (infoEl) {
+              const latestText = info.latest_version ? `（線上最新：${escapeHtml(info.latest_version)}）` : '（目前無法連線至 GitHub 或尚無線上版本）';
+              infoEl.innerHTML = `目前版本：<code>v${escapeHtml(info.current_version)}</code>，已是最新版本 ${latestText}`;
+            }
           }
         }
       } catch (e) {
-        // 離線環境或檢查失敗時靜默略過
+        if (manual && infoEl) {
+          infoEl.textContent = '無法連線至更新伺服器，請確認網路連線。';
+        }
+      }
+    }
+
+    async function applySystemUpdate() {
+      const targetVer = latestUpdateInfo?.latest_version || '最新版本';
+      const assetName = latestUpdateInfo?.asset_name || 'LibRust.exe';
+      if (!confirm(`確定要從 GitHub 下載並自動更新至 ${targetVer}（${assetName}）嗎？\n\n⏳ 下載與套用更新期間請耐心等待，完成後系統將自動重新啟動並重新整理頁面。`)) {
+        return;
+      }
+
+      const footerBtn = document.getElementById('btn-apply-update-footer');
+      const settingsBtn = document.getElementById('btn-apply-update-settings');
+      const statusEl = document.getElementById('apply-update-status');
+      if (footerBtn) {
+        footerBtn.disabled = true;
+        footerBtn.innerHTML = '<span>⏳ 更新下載中...</span>';
+      }
+      if (settingsBtn) {
+        settingsBtn.disabled = true;
+        settingsBtn.textContent = '⏳ 正在下載新版執行檔並套用更新，請耐心等待...';
+      }
+      if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.style.background = '#fef3c7';
+        statusEl.style.color = '#92400e';
+        statusEl.style.border = '1px solid #f59e0b';
+        statusEl.textContent = '⏳ 正在從 GitHub 下載新版執行檔並自動替換，請耐心等待，切勿關閉視窗...';
+      }
+
+      try {
+        const res = await fetch('/api/system/apply-update', { method: 'POST' });
+        const data = await res.json();
+        if (!data.success) {
+          if (statusEl) {
+            statusEl.style.background = '#fee2e2';
+            statusEl.style.color = '#b91c1c';
+            statusEl.style.border = '1px solid #f87171';
+            statusEl.textContent = `❌ ${data.message}`;
+          }
+          alert(data.message);
+          if (footerBtn) {
+            footerBtn.disabled = false;
+            footerBtn.innerHTML = `<span>⬇️ 一鍵更新至 ${escapeHtml(targetVer)}</span>`;
+          }
+          if (settingsBtn) {
+            settingsBtn.disabled = false;
+            settingsBtn.textContent = `⬇️ 一鍵下載並更新至 ${targetVer}`;
+          }
+          return;
+        }
+
+        // 顯示等待重啟畫面並輪詢 /api/system/ping 直到新版啟動完成
+        document.body.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0f172a;color:#f8fafc;font-family:sans-serif;text-align:center;padding:2rem;">
+            <div style="max-width:480px;background:#1e293b;padding:2.5rem;border-radius:1rem;border:1px solid #334155;">
+              <div style="font-size:3rem;margin-bottom:1rem;">🚀</div>
+              <h2 style="margin-bottom:0.75rem;color:#38bdf8;">系統更新完成，正在重新啟動...</h2>
+              <p style="color:#cbd5e1;line-height:1.6;margin-bottom:1.25rem;">${escapeHtml(data.message)}</p>
+              <p id="update-reload-hint" style="color:#94a3b8;font-size:0.9rem;">⏳ 正在等待新版伺服器就緒，就緒後將自動重新載入頁面...</p>
+            </div>
+          </div>
+        `;
+
+        let attempts = 0;
+        const pollTimer = setInterval(async () => {
+          attempts++;
+          try {
+            const pingRes = await fetch('/api/system/ping', { cache: 'no-store' });
+            if (pingRes.ok) {
+              const pingData = await pingRes.json();
+              if (pingData && pingData.app === 'librust') {
+                clearInterval(pollTimer);
+                window.location.reload();
+                return;
+              }
+            }
+          } catch (_) {
+            // 舊程序剛結束、新程序尚未完成綁定，繼續等待
+          }
+          if (attempts >= 40) {
+            clearInterval(pollTimer);
+            const hint = document.getElementById('update-reload-hint');
+            if (hint) {
+              hint.textContent = '重啟等待逾時，請手動重新整理頁面或重新開啟「圖書管理系統.exe」。';
+            }
+          }
+        }, 1500);
+      } catch (e) {
+        const errMsg = '下載更新時發生連線錯誤：' + e.message;
+        if (statusEl) {
+          statusEl.style.background = '#fee2e2';
+          statusEl.style.color = '#b91c1c';
+          statusEl.style.border = '1px solid #f87171';
+          statusEl.textContent = `❌ ${errMsg}`;
+        }
+        alert(errMsg);
+        if (footerBtn) footerBtn.disabled = false;
+        if (settingsBtn) settingsBtn.disabled = false;
       }
     }
 

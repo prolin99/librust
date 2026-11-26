@@ -27,8 +27,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("     📚 現代化單機版圖書管理借還系統 (Rust 核心)");
     println!("========================================================");
 
-    // 1. 設定工作路徑
+    let is_post_update = std::env::args().any(|a| a == "--post-update");
+
+    // 1. 設定工作路徑並清理上次自動更新殘留的 .old / .new 暫存檔
     let current_dir = if let Ok(exe_path) = std::env::current_exe() {
+        let mut old_path = exe_path.as_os_str().to_os_string();
+        old_path.push(".old");
+        let old_path = PathBuf::from(old_path);
+        let mut new_path = exe_path.as_os_str().to_os_string();
+        new_path.push(".new");
+        let new_path = PathBuf::from(new_path);
+
+        if is_post_update {
+            // 等待舊程式結束並釋放連接埠與檔案鎖定
+            for _ in 0..20 {
+                if old_path.exists() && std::fs::remove_file(&old_path).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        } else {
+            let _ = std::fs::remove_file(&old_path);
+        }
+        let _ = std::fs::remove_file(&new_path);
+
         if let Some(parent) = exe_path.parent() {
             if parent.join("library.db").exists() || parent.join("data").exists() {
                 parent.to_path_buf()
@@ -43,7 +65,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 2. 檢查是否已在運行中，避免重複執行導致 port 號一直遞增
-    if let Some(active_port) = find_running_instance(&current_dir).await {
+    if is_post_update {
+        for _ in 0..20 {
+            if find_running_instance(&current_dir).await.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    } else if let Some(active_port) = find_running_instance(&current_dir).await {
         let url = format!("http://localhost:{}", active_port);
         println!("\n[✔] 偵測到圖書管理系統已在運行中 (連接埠: {})！", active_port);
         println!("👉 自動為您開啟系統畫面: {}", url);
@@ -65,8 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. 若為新建立的資料庫且 data/ 目錄存在，自動匯入舊系統 DBF 資料
     if is_new_db && data_dir.exists() {
-        println!("[-] 偵測到初次啟動與舊系統 data 目錄，自動進行舊資料庫無痛移轉...");
-        match import_legacy_data(&db, &data_dir) {
+        println!("[-] 偵測到初次啟動與舊系統 data 目錄，正在建立資料庫並移轉舊版 DBF 資料...");
+        println!("[⏳] 讀取舊版 DBF 檔案（含書籍、讀者與歷史借閱紀錄）可能需要較長時間，請耐心等待，切勿關閉視窗！");
+        match import_legacy_data(&db, &data_dir, false) {
             Ok(msg) => println!("[✔] 舊系統資料移轉完成: {}", msg),
             Err(e) => eprintln!("[!] 移轉過程發生警示: {}", e),
         }
@@ -117,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::write(&port_file, port.to_string());
 
     let url = format!("http://localhost:{}", port);
-    println!("\n[✔] 圖書管理系統已啟動成功 (v0.9)！");
+    println!("\n[✔] 圖書管理系統已啟動成功 (v0.10)！");
     println!("👉 本機連線請於瀏覽器開啟: {}", url);
     println!("👉 區網其他裝置請連線: http://<本機IP>:{}", port);
     println!("👉 自動為您開啟預設瀏覽器中...");
@@ -125,14 +155,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("提示：此系統為單機獨立運作，所有書籍與借還資料均儲存在本地 library.db");
     println!("若欲關閉系統，可在網頁右上角點擊「關閉系統」，或於右下角系統匣圖示按右鍵退出。\n");
 
-    // 自動開啟預設瀏覽器
-    let _ = open::that(&url);
+    // 自動開啟預設瀏覽器（自動更新重啟時不重複開新分頁）
+    if !is_post_update {
+        let _ = open::that(&url);
+    }
 
     // 8. 註冊 Windows 系統匣圖示 (System Tray)
     #[cfg(windows)]
     let _tray = match tray_item::TrayItem::new("圖書管理系統", tray_item::IconSource::Resource("app-icon")) {
         Ok(mut t) => {
-            let _ = t.add_label("📚 圖書管理借還系統 (v0.9)");
+            let _ = t.add_label("📚 圖書管理借還系統 (v0.10)");
             let url_open = url.clone();
             let _ = t.add_menu_item("開啟系統網頁", move || {
                 let _ = open::that(&url_open);

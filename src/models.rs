@@ -163,6 +163,9 @@ pub struct UpdateCheckResult {
     pub latest_version: Option<String>,
     pub has_update: bool,
     pub release_url: String,
+    pub download_url: Option<String>,
+    pub asset_name: Option<String>,
+    pub asset_size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

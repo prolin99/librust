@@ -14,7 +14,7 @@ use crate::models::*;
 use crate::importer::*;
 use crate::enricher::EnricherManager;
 
-pub const APP_VERSION: &str = "0.9";
+pub const APP_VERSION: &str = "0.10";
 pub const GITHUB_RELEASES_URL: &str = "https://github.com/prolin99/librust/releases";
 const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/prolin99/librust/releases/latest";
 const GITHUB_RELEASES_LIST_API: &str = "https://api.github.com/repos/prolin99/librust/releases?per_page=1";
@@ -115,6 +115,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/system/shutdown", post(handle_system_shutdown))
         .route("/api/system/ping", get(handle_system_ping))
         .route("/api/system/check-update", get(handle_check_update))
+        .route("/api/system/apply-update", post(handle_apply_update))
         // 圖示與網站 Favicon
         .route("/favicon.ico", get(serve_favicon))
         .route("/app.png", get(serve_app_png))
@@ -505,10 +506,24 @@ async fn get_stats_range(
     }
 }
 
-async fn trigger_legacy_import(State(state): State<AppState>) -> Json<ApiResponse<String>> {
-    match import_legacy_data(&state.db, &state.data_dir) {
-        Ok(msg) => Json(ApiResponse::ok(format!("舊系統資料匯入成功：{}", msg), msg)),
-        Err(e) => Json(ApiResponse::err(format!("匯入失敗: {}", e))),
+#[derive(Debug, Deserialize, Default)]
+pub struct LegacyImportRequest {
+    #[serde(default)]
+    pub clear_existing: bool,
+}
+
+async fn trigger_legacy_import(
+    State(state): State<AppState>,
+    payload: Option<Json<LegacyImportRequest>>,
+) -> Json<ApiResponse<String>> {
+    let clear_existing = payload.map(|Json(p)| p.clear_existing).unwrap_or(false);
+    let db = state.db.clone();
+    let data_dir = state.data_dir.clone();
+    let res = tokio::task::spawn_blocking(move || import_legacy_data(&db, &data_dir, clear_existing)).await;
+    match res {
+        Ok(Ok(msg)) => Json(ApiResponse::ok(format!("舊系統資料匯入成功：{}", msg), msg)),
+        Ok(Err(e)) => Json(ApiResponse::err(format!("匯入失敗: {}", e))),
+        Err(e) => Json(ApiResponse::err(format!("匯入工作執行異常: {}", e))),
     }
 }
 
@@ -561,17 +576,46 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     false
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    size: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct GithubReleaseItem {
     tag_name: String,
     html_url: Option<String>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAsset>,
 }
 
-async fn fetch_latest_github_release() -> Option<(String, String)> {
+/// 從 GitHub Release 附件中挑選 Windows 執行檔（優先選擇檔名含 librust 的 .exe，其次取第一個 .exe）
+fn select_exe_asset(assets: &[GithubReleaseAsset]) -> Option<GithubReleaseAsset> {
+    let exe_assets: Vec<&GithubReleaseAsset> = assets
+        .iter()
+        .filter(|a| {
+            let lower = a.name.to_ascii_lowercase();
+            lower.ends_with(".exe") && !a.browser_download_url.trim().is_empty()
+        })
+        .collect();
+
+    if let Some(preferred) = exe_assets
+        .iter()
+        .find(|a| a.name.to_ascii_lowercase().contains("librust"))
+    {
+        return Some((*preferred).clone());
+    }
+    exe_assets.first().map(|a| (*a).clone())
+}
+
+async fn fetch_latest_github_release() -> Option<(String, String, Option<GithubReleaseAsset>)> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .user_agent(format!("LibRust/{}", APP_VERSION))
         .build()
         .ok()?;
@@ -587,7 +631,8 @@ async fn fetch_latest_github_release() -> Option<(String, String)> {
             if let Ok(item) = resp.json::<GithubReleaseItem>().await {
                 if !item.tag_name.trim().is_empty() {
                     let url = item.html_url.unwrap_or_else(|| GITHUB_RELEASES_URL.to_string());
-                    return Some((item.tag_name, url));
+                    let asset = select_exe_asset(&item.assets);
+                    return Some((item.tag_name, url, asset));
                 }
             }
         }
@@ -604,7 +649,8 @@ async fn fetch_latest_github_release() -> Option<(String, String)> {
             if let Ok(items) = resp.json::<Vec<GithubReleaseItem>>().await {
                 if let Some(item) = items.into_iter().find(|r| !r.draft && !r.tag_name.trim().is_empty()) {
                     let url = item.html_url.unwrap_or_else(|| GITHUB_RELEASES_URL.to_string());
-                    return Some((item.tag_name, url));
+                    let asset = select_exe_asset(&item.assets);
+                    return Some((item.tag_name, url, asset));
                 }
             }
         }
@@ -613,9 +659,18 @@ async fn fetch_latest_github_release() -> Option<(String, String)> {
     None
 }
 
-async fn handle_check_update() -> Json<ApiResponse<UpdateCheckResult>> {
+#[derive(Debug, Deserialize, Default)]
+pub struct CheckUpdateQuery {
+    #[serde(default)]
+    pub force: Option<String>,
+}
+
+async fn handle_check_update(
+    Query(query): Query<CheckUpdateQuery>,
+) -> Json<ApiResponse<UpdateCheckResult>> {
+    let force_refresh = matches!(query.force.as_deref(), Some("1") | Some("true"));
     let cache = UPDATE_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
-    {
+    if !force_refresh {
         let guard = cache.read().await;
         if let Some((checked_at, ref cached)) = *guard {
             if checked_at.elapsed() < std::time::Duration::from_secs(1800) {
@@ -625,13 +680,16 @@ async fn handle_check_update() -> Json<ApiResponse<UpdateCheckResult>> {
     }
 
     let result = match fetch_latest_github_release().await {
-        Some((tag, url)) => {
+        Some((tag, url, asset)) => {
             let has_update = is_newer_version(APP_VERSION, &tag);
             let res = UpdateCheckResult {
                 current_version: APP_VERSION.to_string(),
                 latest_version: Some(tag),
                 has_update,
                 release_url: url,
+                download_url: asset.as_ref().map(|a| a.browser_download_url.clone()),
+                asset_name: asset.as_ref().map(|a| a.name.clone()),
+                asset_size: asset.as_ref().map(|a| a.size),
             };
             let mut guard = cache.write().await;
             *guard = Some((std::time::Instant::now(), res.clone()));
@@ -642,10 +700,152 @@ async fn handle_check_update() -> Json<ApiResponse<UpdateCheckResult>> {
             latest_version: None,
             has_update: false,
             release_url: GITHUB_RELEASES_URL.to_string(),
+            download_url: None,
+            asset_name: None,
+            asset_size: None,
         },
     };
 
     Json(ApiResponse::ok("版本檢查完成", result))
+}
+
+async fn handle_apply_update(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<ApiResponse<String>> {
+    // 驗證管理員登入狀態
+    let is_authed = extract_token(&headers)
+        .and_then(|tok| validate_session(&state.db, &tok))
+        .is_some();
+    if !is_authed {
+        return Json(ApiResponse::err("請先登入管理員帳號後再執行系統更新！"));
+    }
+
+    // 1. 即時查詢 GitHub 最新 Release
+    let (tag, _release_url, asset_opt) = match fetch_latest_github_release().await {
+        Some(v) => v,
+        None => return Json(ApiResponse::err("無法連線至 GitHub Releases 取得最新版本資訊，請確認網路連線。")),
+    };
+
+    if !is_newer_version(APP_VERSION, &tag) {
+        return Json(ApiResponse::err(format!(
+            "目前已是最新版本 (v{})，無須更新。",
+            APP_VERSION
+        )));
+    }
+
+    let asset = match asset_opt {
+        Some(a) => a,
+        None => {
+            return Json(ApiResponse::err(format!(
+                "最新版本 {} 尚未附上可自動更新的 Windows 執行檔（.exe），請前往 GitHub Releases 手動下載。",
+                tag
+            )));
+        }
+    };
+
+    // 安全檢查：僅允許從 GitHub 官方網域下載
+    if !asset.browser_download_url.starts_with("https://github.com/")
+        && !asset.browser_download_url.starts_with("https://objects.githubusercontent.com/")
+    {
+        return Json(ApiResponse::err("不支援的下載來源網址，已中止更新。"));
+    }
+
+    // 2. 下載新版執行檔（最長等待 180 秒）
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .user_agent(format!("LibRust/{}", APP_VERSION))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Json(ApiResponse::err(format!("建立下載連線失敗: {}", e))),
+    };
+
+    let resp = match client.get(&asset.browser_download_url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => return Json(ApiResponse::err(format!("下載新版執行檔失敗 (HTTP {})", r.status()))),
+        Err(e) => return Json(ApiResponse::err(format!("下載新版執行檔失敗: {}", e))),
+    };
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Json(ApiResponse::err(format!("讀取下載檔案內容失敗: {}", e))),
+    };
+
+    // 3. 驗證完整性與 Windows PE 標頭 ("MZ")
+    if bytes.len() < 100 * 1024 || &bytes[0..2] != b"MZ" {
+        return Json(ApiResponse::err("下載的檔案不是有效的 Windows 執行檔，已取消更新。"));
+    }
+    if asset.size > 0 && (bytes.len() as u64) != asset.size {
+        return Json(ApiResponse::err(format!(
+            "下載檔案大小不符（預期 {} bytes，實際 {} bytes），請稍後重試。",
+            asset.size,
+            bytes.len()
+        )));
+    }
+
+    // 4. 透過 current_exe() 取得本機實際執行檔路徑（保留中文檔名如 圖書管理系統.exe）
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(format!("無法取得目前執行檔路徑: {}", e))),
+    };
+
+    let mut new_path_os = current_exe.as_os_str().to_os_string();
+    new_path_os.push(".new");
+    let new_path = std::path::PathBuf::from(new_path_os);
+
+    let mut old_path_os = current_exe.as_os_str().to_os_string();
+    old_path_os.push(".old");
+    let old_path = std::path::PathBuf::from(old_path_os);
+
+    // 寫入 .new 暫存檔
+    if let Err(e) = std::fs::write(&new_path, &bytes) {
+        let _ = std::fs::remove_file(&new_path);
+        return Json(ApiResponse::err(format!(
+            "無法寫入更新暫存檔（請確認目錄具備寫入權限，勿放置於 Program Files）: {}",
+            e
+        )));
+    }
+
+    // 5. 安全替換：目前執行檔 -> .old，.new -> 目前執行檔
+    let _ = std::fs::remove_file(&old_path);
+    if let Err(e) = std::fs::rename(&current_exe, &old_path) {
+        let _ = std::fs::remove_file(&new_path);
+        return Json(ApiResponse::err(format!("無法備份舊版執行檔: {}", e)));
+    }
+
+    if let Err(e) = std::fs::rename(&new_path, &current_exe) {
+        // 若替換失敗，立刻回復舊版執行檔
+        let _ = std::fs::rename(&old_path, &current_exe);
+        let _ = std::fs::remove_file(&new_path);
+        return Json(ApiResponse::err(format!("無法套用新版執行檔（已自動回復舊版）: {}", e)));
+    }
+
+    // 6. 將 SQLite WAL 刷寫回主檔並啟動新版程式後安全退出
+    {
+        if let Ok(conn) = state.db.lock() {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+    }
+
+    let port_file = state.data_dir.parent().map(|p| p.join("library.port"));
+    let exe_to_launch = current_exe.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+        if let Some(pf) = port_file {
+            let _ = std::fs::remove_file(pf);
+        }
+        let _ = std::process::Command::new(&exe_to_launch)
+            .arg("--post-update")
+            .spawn();
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        std::process::exit(0);
+    });
+
+    Json(ApiResponse::ok(
+        format!("已成功下載並更新至 {}（{}），系統正在重新啟動...", tag, asset.name),
+        tag,
+    ))
 }
 
 async fn handle_system_shutdown(State(state): State<AppState>) -> Json<ApiResponse<()>> {
@@ -1373,9 +1573,9 @@ mod tests {
     use axum::body::to_bytes;
 
     #[tokio::test]
-    async fn test_ping_version_is_0_9() {
+    async fn test_ping_version_is_0_10() {
         let resp = handle_system_ping().await;
-        assert_eq!(resp.0.version, "0.9");
+        assert_eq!(resp.0.version, "0.10");
     }
 
     #[test]
@@ -1389,6 +1589,30 @@ mod tests {
         assert!(!is_newer_version("0.9", "0.8"));
         assert!(!is_newer_version("0.9", "v0.8.9"));
         assert!(!is_newer_version("0.9", ""));
+    }
+
+    #[test]
+    fn test_select_exe_asset() {
+        let assets = vec![
+            GithubReleaseAsset {
+                name: "LibRust.zip".to_string(),
+                browser_download_url: "https://github.com/prolin99/librust/releases/download/v0.11/LibRust.zip".to_string(),
+                size: 1000,
+            },
+            GithubReleaseAsset {
+                name: "helper.exe".to_string(),
+                browser_download_url: "https://github.com/prolin99/librust/releases/download/v0.11/helper.exe".to_string(),
+                size: 2000,
+            },
+            GithubReleaseAsset {
+                name: "LibRust.exe".to_string(),
+                browser_download_url: "https://github.com/prolin99/librust/releases/download/v0.11/LibRust.exe".to_string(),
+                size: 9000000,
+            },
+        ];
+        let picked = select_exe_asset(&assets).unwrap();
+        assert_eq!(picked.name, "LibRust.exe");
+        assert_eq!(picked.size, 9000000);
     }
 
     #[tokio::test]
