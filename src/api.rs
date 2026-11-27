@@ -14,7 +14,7 @@ use crate::models::*;
 use crate::importer::*;
 use crate::enricher::EnricherManager;
 
-pub const APP_VERSION: &str = "0.10";
+pub const APP_VERSION: &str = "0.11";
 pub const GITHUB_RELEASES_URL: &str = "https://github.com/prolin99/librust/releases";
 const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/prolin99/librust/releases/latest";
 const GITHUB_RELEASES_LIST_API: &str = "https://api.github.com/repos/prolin99/librust/releases?per_page=1";
@@ -24,6 +24,7 @@ static UPDATE_CACHE: std::sync::OnceLock<tokio::sync::RwLock<Option<(std::time::
 #[derive(Clone)]
 pub struct AppState {
     pub db: DbPool,
+    pub db_path: PathBuf,
     pub data_dir: PathBuf,
     pub covers_dir: PathBuf,
     pub enricher: Arc<EnricherManager>,
@@ -116,6 +117,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/system/ping", get(handle_system_ping))
         .route("/api/system/check-update", get(handle_check_update))
         .route("/api/system/apply-update", post(handle_apply_update))
+        // 資料庫備份與還原
+        .route("/api/system/backup/status", get(handle_backup_status))
+        .route("/api/system/backup/config", post(handle_save_backup_config))
+        .route("/api/system/backup/pick-dir", post(handle_pick_backup_dir))
+        .route("/api/system/backup/create", post(handle_create_backup))
+        .route("/api/system/backup/download-current", get(handle_download_current_db))
+        .route("/api/system/backup/download/:filename", get(handle_download_backup))
+        .route("/api/system/backup/restore", post(handle_restore_backup))
+        .route("/api/system/backup/restore-upload", post(handle_restore_upload))
+        .route("/api/system/backup/:filename", delete(handle_delete_backup))
         // 圖示與網站 Favicon
         .route("/favicon.ico", get(serve_favicon))
         .route("/app.png", get(serve_app_png))
@@ -860,6 +871,453 @@ async fn handle_system_shutdown(State(state): State<AppState>) -> Json<ApiRespon
     Json(ApiResponse::ok("系統即將安全關閉", ()))
 }
 
+// === 資料庫備份與還原 API ===
+
+#[derive(Debug, Serialize)]
+pub struct BackupStatusResponse {
+    pub backup_dir: String,
+    pub reminder_cycle: String,
+    pub last_backup_at: Option<String>,
+    pub last_backup_display: Option<String>,
+    pub reminder_due: bool,
+    pub days_since_last_backup: Option<i64>,
+    pub max_keep: usize,
+    pub files: Vec<BackupFileInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveBackupConfigRequest {
+    pub backup_dir: String,
+    pub reminder_cycle: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CreateBackupRequest {
+    #[serde(default)]
+    pub backup_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreBackupRequest {
+    pub filename: String,
+}
+
+fn default_backup_dir(state: &AppState) -> PathBuf {
+    state
+        .db_path
+        .parent()
+        .map(|p| p.join("backups"))
+        .unwrap_or_else(|| PathBuf::from("backups"))
+}
+
+fn resolve_backup_dir(state: &AppState) -> PathBuf {
+    let saved = get_setting(&state.db, "backup_dir", "");
+    let trimmed = saved.trim();
+    if trimmed.is_empty() {
+        default_backup_dir(state)
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+fn is_safe_backup_filename(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains(':')
+}
+
+fn compute_backup_reminder(cycle: &str, last_backup_iso: Option<&str>) -> (bool, Option<i64>, Option<String>) {
+    let threshold_days: Option<i64> = match cycle {
+        "weekly" => Some(7),
+        "monthly" => Some(30),
+        _ => None,
+    };
+
+    let (days_since, display) = match last_backup_iso {
+        Some(raw) if !raw.trim().is_empty() => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw.trim()) {
+                let now = Local::now();
+                let days = (now.signed_duration_since(dt.with_timezone(&Local))).num_days().max(0);
+                let disp = dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string();
+                (Some(days), Some(disp))
+            } else {
+                (None, Some(raw.trim().to_string()))
+            }
+        }
+        _ => (None, None),
+    };
+
+    let due = match threshold_days {
+        Some(limit) => match days_since {
+            Some(d) => d >= limit,
+            None => true, // 已開啟定期提醒但從未備份過
+        },
+        None => false,
+    };
+
+    (due, days_since, display)
+}
+
+fn require_admin_session(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    extract_token(headers)
+        .and_then(|tok| validate_session(&state.db, &tok))
+        .is_some()
+}
+
+async fn handle_backup_status(State(state): State<AppState>) -> Json<ApiResponse<BackupStatusResponse>> {
+    let dir = resolve_backup_dir(&state);
+    let cycle = get_setting(&state.db, "backup_reminder_cycle", "weekly");
+    let last_raw = get_setting(&state.db, "last_backup_at", "");
+    let last_opt = if last_raw.trim().is_empty() { None } else { Some(last_raw.clone()) };
+    let (reminder_due, days_since, display) = compute_backup_reminder(&cycle, last_opt.as_deref());
+    let files = list_backup_files(&dir);
+
+    Json(ApiResponse::ok(
+        "讀取備份狀態成功",
+        BackupStatusResponse {
+            backup_dir: dir.to_string_lossy().to_string(),
+            reminder_cycle: cycle,
+            last_backup_at: last_opt,
+            last_backup_display: display,
+            reminder_due,
+            days_since_last_backup: days_since,
+            max_keep: BACKUP_MAX_KEEP,
+            files,
+        },
+    ))
+}
+
+async fn handle_save_backup_config(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<SaveBackupConfigRequest>,
+) -> Json<ApiResponse<String>> {
+    if !require_admin_session(&state, &headers) {
+        return Json(ApiResponse::err("請先登入管理員帳號！"));
+    }
+
+    let cycle = match payload.reminder_cycle.as_str() {
+        "off" | "weekly" | "monthly" => payload.reminder_cycle.as_str(),
+        _ => return Json(ApiResponse::err("無效的提醒週期設定（僅支援 off / weekly / monthly）")),
+    };
+
+    let dir_str = payload.backup_dir.trim();
+    let final_dir = if dir_str.is_empty() {
+        default_backup_dir(&state)
+    } else {
+        PathBuf::from(dir_str)
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&final_dir) {
+        return Json(ApiResponse::err(format!(
+            "無法建立或存取備份目錄 [{}]：{}",
+            final_dir.display(),
+            e
+        )));
+    }
+
+    let final_dir_str = final_dir.to_string_lossy().to_string();
+    let _ = save_setting(&state.db, "backup_dir", &final_dir_str);
+    let _ = save_setting(&state.db, "backup_reminder_cycle", cycle);
+
+    Json(ApiResponse::ok(
+        format!("備份設定已儲存（目錄：{}）", final_dir_str),
+        final_dir_str,
+    ))
+}
+
+async fn handle_pick_backup_dir(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<ApiResponse<Option<String>>> {
+    if !require_admin_session(&state, &headers) {
+        return Json(ApiResponse::err("請先登入管理員帳號！"));
+    }
+
+    let current_dir = resolve_backup_dir(&state).to_string_lossy().to_string();
+
+    #[cfg(windows)]
+    {
+        let res = tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let escaped = current_dir.replace('\'', "''");
+            let script = format!(
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+                 Add-Type -AssemblyName System.Windows.Forms; \
+                 $f = New-Object System.Windows.Forms.FolderBrowserDialog; \
+                 $f.Description = '請選擇資料庫備份儲存目錄'; \
+                 if (Test-Path '{0}') {{ $f.SelectedPath = '{0}'; }}; \
+                 $f.ShowNewFolderButton = $true; \
+                 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output $f.SelectedPath }}",
+                escaped
+            );
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-STA", "-Command", &script])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+        })
+        .await;
+
+        match res {
+            Ok(Ok(output)) if output.status.success() => {
+                let picked = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if picked.is_empty() {
+                    Json(ApiResponse::ok("已取消選擇資料夾", None))
+                } else {
+                    Json(ApiResponse::ok("已選擇資料夾", Some(picked)))
+                }
+            }
+            _ => Json(ApiResponse::err("無法開啟系統資料夾選擇視窗，請手動輸入完整目錄路徑。")),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = current_dir;
+        Json(ApiResponse::err("此平台不支援原生資料夾選擇視窗，請直接輸入路徑。"))
+    }
+}
+
+async fn handle_create_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    payload: Option<Json<CreateBackupRequest>>,
+) -> Json<ApiResponse<BackupResult>> {
+    if !require_admin_session(&state, &headers) {
+        return Json(ApiResponse::err("請先登入管理員帳號！"));
+    }
+
+    let backup_dir = match payload.and_then(|Json(p)| p.backup_dir) {
+        Some(custom) if !custom.trim().is_empty() => {
+            let trimmed = custom.trim().to_string();
+            let _ = save_setting(&state.db, "backup_dir", &trimmed);
+            PathBuf::from(trimmed)
+        }
+        _ => resolve_backup_dir(&state),
+    };
+
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        create_database_backup(&db, &backup_dir, "library_backup", true)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(result)) => {
+            let prune_note = if result.pruned_count > 0 {
+                format!("（已自動清理 {} 份最舊備份，保留最新 {} 份）", result.pruned_count, BACKUP_MAX_KEEP)
+            } else {
+                String::new()
+            };
+            Json(ApiResponse::ok(
+                format!("資料庫備份成功：{}{}", result.filename, prune_note),
+                result,
+            ))
+        }
+        Ok(Err(e)) => Json(ApiResponse::err(e)),
+        Err(e) => Json(ApiResponse::err(format!("備份執行異常: {}", e))),
+    }
+}
+
+async fn handle_download_backup(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> impl IntoResponse {
+    if !is_safe_backup_filename(&filename) {
+        return (StatusCode::BAD_REQUEST, "無效的檔案名稱").into_response();
+    }
+    let dir = resolve_backup_dir(&state);
+    let path = dir.join(&filename);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let disposition = format!(
+                "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+                filename,
+                url_encode(&filename)
+            );
+            let mut headers = header::HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/octet-stream"));
+            if let Ok(val) = header::HeaderValue::from_str(&disposition) {
+                headers.insert(header::CONTENT_DISPOSITION, val);
+            }
+            (headers, bytes).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "找不到指定的備份檔").into_response(),
+    }
+}
+
+async fn handle_download_current_db(State(state): State<AppState>) -> impl IntoResponse {
+    let db = state.db.clone();
+    let temp_dir = std::env::temp_dir().join(format!("librust_dl_{}", fastrand::u64(..)));
+    let res = tokio::task::spawn_blocking(move || {
+        let b = create_database_backup(&db, &temp_dir, "library_snapshot", false)?;
+        let bytes = std::fs::read(&b.path).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok::<(String, Vec<u8>), String>((b.filename, bytes))
+    })
+    .await;
+
+    match res {
+        Ok(Ok((filename, bytes))) => {
+            let disposition = format!("attachment; filename=\"{}\"", filename);
+            let mut headers = header::HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/octet-stream"));
+            if let Ok(val) = header::HeaderValue::from_str(&disposition) {
+                headers.insert(header::CONTENT_DISPOSITION, val);
+            }
+            (headers, bytes).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "產生資料庫快照失敗").into_response(),
+    }
+}
+
+async fn handle_delete_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(filename): Path<String>,
+) -> Json<ApiResponse<String>> {
+    if !require_admin_session(&state, &headers) {
+        return Json(ApiResponse::err("請先登入管理員帳號！"));
+    }
+    if !is_safe_backup_filename(&filename) {
+        return Json(ApiResponse::err("無效的備份檔名！"));
+    }
+    let path = resolve_backup_dir(&state).join(&filename);
+    if !path.exists() {
+        return Json(ApiResponse::err("找不到指定的備份檔！"));
+    }
+    match std::fs::remove_file(&path) {
+        Ok(_) => Json(ApiResponse::ok(format!("已刪除備份檔：{}", filename), filename)),
+        Err(e) => Json(ApiResponse::err(format!("刪除失敗：{}", e))),
+    }
+}
+
+async fn handle_restore_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<RestoreBackupRequest>,
+) -> Json<ApiResponse<RestoreResult>> {
+    if !require_admin_session(&state, &headers) {
+        return Json(ApiResponse::err("請先登入管理員帳號！"));
+    }
+    if !is_safe_backup_filename(&payload.filename) {
+        return Json(ApiResponse::err("無效的備份檔名！"));
+    }
+
+    let backup_dir = resolve_backup_dir(&state);
+    let source_path = backup_dir.join(&payload.filename);
+    let db = state.db.clone();
+    let db_path = state.db_path.clone();
+
+    let res = tokio::task::spawn_blocking(move || {
+        restore_database_from_file(&db, &db_path, &source_path, &backup_dir)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(info)) => {
+            let mig_note = if info.migrated_from_version < info.current_schema_version {
+                format!(
+                    "（已自動將舊版結構 v{} 升級至最新版 v{}）",
+                    info.migrated_from_version, info.current_schema_version
+                )
+            } else {
+                String::new()
+            };
+            Json(ApiResponse::ok(
+                format!(
+                    "已成功從 {} 還原資料{}！原資料已自動備份至 {}，且目前管理員帳號密碼已完整保留。",
+                    info.restored_from, mig_note, info.pre_restore_backup
+                ),
+                info,
+            ))
+        }
+        Ok(Err(e)) => Json(ApiResponse::err(format!("還原失敗：{}", e))),
+        Err(e) => Json(ApiResponse::err(format!("還原執行異常：{}", e))),
+    }
+}
+
+async fn handle_restore_upload(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: Multipart,
+) -> Json<ApiResponse<RestoreResult>> {
+    if !require_admin_session(&state, &headers) {
+        return Json(ApiResponse::err("請先登入管理員帳號！"));
+    }
+
+    let mut uploaded_bytes: Option<Vec<u8>> = None;
+    let mut uploaded_name = String::from("uploaded_backup.db");
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if let Some(fname) = field.file_name() {
+            if !fname.trim().is_empty() {
+                uploaded_name = fname.to_string();
+            }
+        }
+        if let Ok(bytes) = field.bytes().await {
+            if !bytes.is_empty() {
+                uploaded_bytes = Some(bytes.to_vec());
+                break;
+            }
+        }
+    }
+
+    let Some(bytes) = uploaded_bytes else {
+        return Json(ApiResponse::err("請選擇要還原的 .db 備份檔案！"));
+    };
+
+    let temp_dir = std::env::temp_dir().join(format!("librust_restore_{}", fastrand::u64(..)));
+    if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+        return Json(ApiResponse::err(format!("無法建立暫存目錄：{}", e)));
+    }
+    let safe_name = uploaded_name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or("uploaded_backup.db");
+    let temp_file = temp_dir.join(safe_name);
+    if let Err(e) = std::fs::write(&temp_file, &bytes) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Json(ApiResponse::err(format!("寫入暫存備份檔失敗：{}", e)));
+    }
+
+    let backup_dir = resolve_backup_dir(&state);
+    let db = state.db.clone();
+    let db_path = state.db_path.clone();
+
+    let res = tokio::task::spawn_blocking(move || {
+        let r = restore_database_from_file(&db, &db_path, &temp_file, &backup_dir);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        r
+    })
+    .await;
+
+    match res {
+        Ok(Ok(info)) => {
+            let mig_note = if info.migrated_from_version < info.current_schema_version {
+                format!(
+                    "（已自動將舊版結構 v{} 升級至最新版 v{}）",
+                    info.migrated_from_version, info.current_schema_version
+                )
+            } else {
+                String::new()
+            };
+            Json(ApiResponse::ok(
+                format!(
+                    "已成功從上傳檔 {} 還原資料{}！原資料已自動備份至 {}，且目前管理員帳號密碼已完整保留。",
+                    info.restored_from, mig_note, info.pre_restore_backup
+                ),
+                info,
+            ))
+        }
+        Ok(Err(e)) => Json(ApiResponse::err(format!("還原失敗：{}", e))),
+        Err(e) => Json(ApiResponse::err(format!("還原執行異常：{}", e))),
+    }
+}
+
 async fn serve_favicon() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/x-icon")],
@@ -1573,9 +2031,9 @@ mod tests {
     use axum::body::to_bytes;
 
     #[tokio::test]
-    async fn test_ping_version_is_0_10() {
+    async fn test_ping_version_is_0_11() {
         let resp = handle_system_ping().await;
-        assert_eq!(resp.0.version, "0.10");
+        assert_eq!(resp.0.version, "0.11");
     }
 
     #[test]
@@ -1613,6 +2071,29 @@ mod tests {
         let picked = select_exe_asset(&assets).unwrap();
         assert_eq!(picked.name, "LibRust.exe");
         assert_eq!(picked.size, 9000000);
+    }
+
+    #[test]
+    fn test_backup_reminder_computation() {
+        let now = Local::now();
+        let ten_days_ago = (now - chrono::Duration::days(10)).to_rfc3339();
+        let two_days_ago = (now - chrono::Duration::days(2)).to_rfc3339();
+
+        let (due_off, _, _) = compute_backup_reminder("off", Some(&ten_days_ago));
+        assert!(!due_off);
+
+        let (due_weekly_10, days_10, _) = compute_backup_reminder("weekly", Some(&ten_days_ago));
+        assert!(due_weekly_10);
+        assert_eq!(days_10, Some(10));
+
+        let (due_weekly_2, _, _) = compute_backup_reminder("weekly", Some(&two_days_ago));
+        assert!(!due_weekly_2);
+
+        let (due_monthly_10, _, _) = compute_backup_reminder("monthly", Some(&ten_days_ago));
+        assert!(!due_monthly_10);
+
+        let (due_never, _, _) = compute_backup_reminder("weekly", None);
+        assert!(due_never);
     }
 
     #[tokio::test]
@@ -1710,6 +2191,7 @@ mod tests {
         // 測試 3 個 CSV 匯出端點
         let state = AppState {
             db: db.clone(),
+            db_path: db_path.clone(),
             data_dir,
             covers_dir: covers_dir.clone(),
             enricher: Arc::new(EnricherManager::new(covers_dir)),
@@ -1811,6 +2293,7 @@ mod tests {
 
         let state = AppState {
             db: db.clone(),
+            db_path: db_path.clone(),
             data_dir: data_dir.clone(),
             covers_dir: covers_dir.clone(),
             enricher,

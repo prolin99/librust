@@ -154,6 +154,17 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
     </div>
   </header>
 
+  <!-- 定期備份提醒橫幅 -->
+  <div id="backup-reminder-banner" class="no-print" style="display: none; background: #fef3c7; border-bottom: 1px solid #f59e0b; color: #92400e; padding: 0.65rem 1.5rem; font-size: 0.9rem;">
+    <div style="max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+      <span id="backup-reminder-text" style="font-weight: 600;">⚠️ 提醒：建議定期備份資料庫！</span>
+      <div style="display: flex; gap: 0.5rem; align-items: center;">
+        <button type="button" id="btn-banner-backup-now" class="btn btn-sm" style="background: #d97706; color: white;" onclick="createDatabaseBackup(true)">💾 立即備份</button>
+        <button type="button" class="btn btn-outline btn-sm" style="background: white; color: #92400e; border-color: #f59e0b;" onclick="dismissBackupReminder()">稍後提醒</button>
+      </div>
+    </div>
+  </div>
+
   <main>
     <!-- 1. 借還櫃台 -->
     <section id="tab-circulation" class="tab-content active">
@@ -776,12 +787,9 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <label style="font-weight: 600;">電話</label>
           <input type="text" id="set-lib-phone" style="margin-top: 0.25rem;">
         </div>
-        <div style="margin-bottom: 0.75rem;">
+        <div style="margin-bottom: 1.25rem;">
           <label style="font-weight: 600;">地址</label>
           <input type="text" id="set-lib-address" style="margin-top: 0.25rem;">
-        </div>
-        <div style="margin-bottom: 1.5rem;">
-          <label><input type="checkbox" id="set-show-spine" checked> 列印書籍標籤時，預設包含書脊分類背標</label>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">儲存系統設定</button>
 
@@ -823,9 +831,75 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
 
         <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
 
+        <h3 style="color: var(--primary); margin-bottom: 0.5rem;">💾 資料庫備份與還原</h3>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+          將 <code>library.db</code> 完整備份至指定目錄（系統會自動保留最新 <strong>10 份</strong>常規備份，超過自動刪除最舊者，也可手動刪除），並支援從舊備份還原資料。
+        </p>
+
+        <div style="margin-bottom: 0.75rem;">
+          <label style="font-weight: 600; display: block; margin-bottom: 0.25rem;">備份儲存目錄</label>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <input type="text" id="backup-dir-input" placeholder="例如 D:\圖書館備份 或 E:\backup" style="flex: 1; min-width: 240px;">
+            <button type="button" class="btn btn-outline" onclick="pickBackupDir()">📂 選擇資料夾</button>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 0.85rem;">
+          <div style="min-width: 220px;">
+            <label style="font-weight: 600; display: block; margin-bottom: 0.25rem;">定期備份提醒週期</label>
+            <select id="backup-reminder-cycle">
+              <option value="off">關閉提醒</option>
+              <option value="weekly" selected>每週提醒（超過 7 天）</option>
+              <option value="monthly">每月提醒（超過 30 天）</option>
+            </select>
+          </div>
+          <div id="backup-last-info" style="font-size: 0.85rem; color: var(--text-muted); padding-bottom: 0.45rem;">
+            上次備份時間：載入中...
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="saveBackupConfig()">💾 儲存備份設定</button>
+          <button type="button" id="btn-create-backup" class="btn btn-primary" onclick="createDatabaseBackup(false)">⚡ 立即備份資料庫</button>
+          <a href="/api/system/backup/download-current" class="btn btn-outline" style="text-decoration: none;" download>⬇️ 下載目前資料庫複本</a>
+        </div>
+
+        <div id="backup-action-status" style="display: none; margin-bottom: 1rem; padding: 0.7rem 1rem; border-radius: 0.375rem; font-size: 0.88rem;"></div>
+
+        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 0.375rem; padding: 0.75rem 1rem; font-size: 0.84rem; color: #1e3a8a; margin-bottom: 1rem;">
+          ℹ️ <strong>還原注意事項：</strong>還原舊備份會取回該時間點的書籍、讀者、借閱紀錄與身分別，但會<strong>保留目前最新的管理員帳號密碼（不會還原舊帳號密碼）</strong>。還原前系統會自動為現有資料庫建立一份快照（<code>library_before_restore_*.db</code>），且若還原舊版本資料庫會自動升級資料表格式。
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem;">
+          <strong style="font-size: 0.92rem;">📁 備份目錄現有檔案（由新到舊）</strong>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <input type="file" id="restore-db-file" accept=".db,.sqlite,.sqlite3" style="display: none;" onchange="uploadRestoreDbFile(this)">
+            <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('restore-db-file').click()">📂 選擇其他位置 .db 檔還原</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="loadBackupStatus()">🔄 重新整理清單</button>
+          </div>
+        </div>
+
+        <div class="table-container" style="max-height: 280px; overflow-y: auto;">
+          <table id="backup-files-table">
+            <thead>
+              <tr>
+                <th>備份檔名</th>
+                <th>建立時間</th>
+                <th>大小</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.25rem;">載入中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border);">
+
         <h3 style="margin-bottom: 0.5rem;">🚀 系統版本與線上自動更新</h3>
         <p id="settings-update-info" style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.85rem;">
-          目前版本：<code>v0.10</code>（正在檢查 GitHub Releases 是否有新版...）
+          目前版本：<code>v0.11</code>（正在檢查 GitHub Releases 是否有新版...）
         </p>
         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
           <button type="button" class="btn btn-outline" onclick="checkForUpdates(true)">🔍 檢查新版</button>
@@ -856,7 +930,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.10</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.11</code></span>
         <span style="color: #475569;">|</span>
         <a id="github-releases-link" href="https://github.com/prolin99/librust/releases" target="_blank" rel="noopener noreferrer" title="前往 GitHub Releases 下載頁面" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
@@ -1063,7 +1137,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       if (tabId === 'readers') loadReaders();
       if (tabId === 'roles') loadRoles();
       if (tabId === 'stats') loadStats();
-      if (tabId === 'settings') loadSettings();
+      if (tabId === 'settings') { loadSettings(); loadBackupStatus(); }
     }
 
     // Modal 輔助
@@ -2884,7 +2958,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
         borrow_rules: document.getElementById('set-lib-rules') ? document.getElementById('set-lib-rules').value.trim() : '',
         barcode_width_mm: parseFloat(document.getElementById('set-barcode-w')?.value) || 48,
         barcode_height_mm: parseFloat(document.getElementById('set-barcode-h')?.value) || 40,
-        show_spine_tag: document.getElementById('set-show-spine') ? document.getElementById('set-show-spine').checked : true,
+        show_spine_tag: document.getElementById('opt-show-spine') ? document.getElementById('opt-show-spine').checked : true,
         card_margin_mm: 5,
         requests_per_minute: 20,
         jitter_ms: 1000,
@@ -3268,10 +3342,294 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       }
     }
 
+    // === 資料庫備份、還原與定期提醒 ===
+    let backupReminderDismissed = false;
+
+    function formatFileSize(bytes) {
+      if (!bytes || bytes <= 0) return '0 B';
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function showBackupStatusMsg(msg, isError = false, isPending = false) {
+      const el = document.getElementById('backup-action-status');
+      if (!el) return;
+      el.style.display = 'block';
+      if (isPending) {
+        el.style.background = '#fef3c7';
+        el.style.color = '#92400e';
+        el.style.border = '1px solid #f59e0b';
+      } else if (isError) {
+        el.style.background = '#fee2e2';
+        el.style.color = '#b91c1c';
+        el.style.border = '1px solid #f87171';
+      } else {
+        el.style.background = '#dcfce7';
+        el.style.color = '#15803d';
+        el.style.border = '1px solid #86efac';
+      }
+      el.textContent = msg;
+    }
+
+    function dismissBackupReminder() {
+      backupReminderDismissed = true;
+      const banner = document.getElementById('backup-reminder-banner');
+      if (banner) banner.style.display = 'none';
+    }
+
+    async function loadBackupStatus() {
+      try {
+        const res = await fetch('/api/system/backup/status');
+        const data = await res.json();
+        if (!data.success || !data.data) return;
+        const info = data.data;
+
+        const dirInput = document.getElementById('backup-dir-input');
+        if (dirInput) dirInput.value = info.backup_dir || '';
+        const cycleSel = document.getElementById('backup-reminder-cycle');
+        if (cycleSel) cycleSel.value = info.reminder_cycle || 'weekly';
+
+        const lastInfo = document.getElementById('backup-last-info');
+        if (lastInfo) {
+          if (info.last_backup_display) {
+            const daysTxt = info.days_since_last_backup !== null ? `（距今 ${info.days_since_last_backup} 天）` : '';
+            lastInfo.textContent = `上次備份時間：${info.last_backup_display} ${daysTxt}`;
+          } else {
+            lastInfo.textContent = '上次備份時間：尚未備份過';
+          }
+        }
+
+        // 更新頂部定期備份提醒橫幅
+        const banner = document.getElementById('backup-reminder-banner');
+        const bannerText = document.getElementById('backup-reminder-text');
+        if (banner && bannerText) {
+          if (info.reminder_due && !backupReminderDismissed) {
+            const cycleLabel = info.reminder_cycle === 'monthly' ? '每月' : '每週';
+            if (info.last_backup_display) {
+              bannerText.textContent = `⚠️ ${cycleLabel}備份提醒：距離上次資料庫備份（${info.last_backup_display}）已達 ${info.days_since_last_backup} 天，建議立即備份！`;
+            } else {
+              bannerText.textContent = `⚠️ ${cycleLabel}備份提醒：系統尚未建立過資料庫備份，建議立即備份以保障資料安全！`;
+            }
+            banner.style.display = 'block';
+          } else {
+            banner.style.display = 'none';
+          }
+        }
+
+        // 渲染備份檔案清單
+        const tbody = document.querySelector('#backup-files-table tbody');
+        if (tbody) {
+          const files = info.files || [];
+          if (files.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.25rem;">此備份目錄尚無備份檔案</td></tr>';
+          } else {
+            tbody.innerHTML = files.map(f => {
+              const badge = f.is_pre_restore
+                ? '<span class="badge badge-warning" style="margin-left: 0.35rem;">還原前快照</span>'
+                : '';
+              const safeName = escapeHtml(f.filename);
+              const jsName = JSON.stringify(f.filename);
+              return `
+                <tr>
+                  <td><code>${safeName}</code>${badge}</td>
+                  <td style="font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(f.modified_at)}</td>
+                  <td style="font-size: 0.85rem;">${formatFileSize(f.size_bytes)}</td>
+                  <td style="white-space: nowrap;">
+                    <button type="button" class="btn btn-outline btn-sm" style="color: var(--primary); border-color: var(--primary);" onclick='restoreBackupFile(${jsName})'>🔄 還原</button>
+                    <a class="btn btn-outline btn-sm" style="text-decoration: none;" href="/api/system/backup/download/${encodeURIComponent(f.filename)}" download>⬇️ 下載</a>
+                    <button type="button" class="btn btn-outline btn-sm" style="color: var(--danger); border-color: var(--danger);" onclick='deleteBackupFile(${jsName})'>🗑️ 刪除</button>
+                  </td>
+                </tr>
+              `;
+            }).join('');
+          }
+        }
+      } catch (e) {
+        console.error('載入備份狀態失敗:', e);
+      }
+    }
+
+    async function pickBackupDir() {
+      showBackupStatusMsg('⏳ 正在開啟本機資料夾選擇視窗，請在彈出視窗中選擇目錄...', false, true);
+      try {
+        const res = await fetch('/api/system/backup/pick-dir', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          if (data.data) {
+            const dirInput = document.getElementById('backup-dir-input');
+            if (dirInput) dirInput.value = data.data;
+            showBackupStatusMsg(`已選擇目錄：${data.data}（請點擊「儲存備份設定」或直接「立即備份」）`);
+          } else {
+            const el = document.getElementById('backup-action-status');
+            if (el) el.style.display = 'none';
+          }
+        } else {
+          showBackupStatusMsg(data.message || '選擇資料夾失敗', true);
+        }
+      } catch (e) {
+        showBackupStatusMsg('呼叫資料夾選擇視窗失敗：' + e.message, true);
+      }
+    }
+
+    async function saveBackupConfig() {
+      const backupDir = document.getElementById('backup-dir-input')?.value.trim() || '';
+      const reminderCycle = document.getElementById('backup-reminder-cycle')?.value || 'weekly';
+      try {
+        const res = await fetch('/api/system/backup/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backup_dir: backupDir, reminder_cycle: reminderCycle }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          backupReminderDismissed = false;
+          showBackupStatusMsg(`✅ ${data.message}`);
+          loadBackupStatus();
+        } else {
+          showBackupStatusMsg(`❌ ${data.message}`, true);
+        }
+      } catch (e) {
+        showBackupStatusMsg('儲存設定失敗：' + e.message, true);
+      }
+    }
+
+    async function createDatabaseBackup(fromBanner = false) {
+      const btnSettings = document.getElementById('btn-create-backup');
+      const btnBanner = document.getElementById('btn-banner-backup-now');
+      if (btnSettings) { btnSettings.disabled = true; btnSettings.textContent = '⏳ 備份中...'; }
+      if (btnBanner) { btnBanner.disabled = true; btnBanner.textContent = '⏳ 備份中...'; }
+      if (!fromBanner) {
+        showBackupStatusMsg('⏳ 正在建立完整資料庫備份檔，請稍候...', false, true);
+      }
+
+      const customDir = !fromBanner ? (document.getElementById('backup-dir-input')?.value.trim() || null) : null;
+      try {
+        const res = await fetch('/api/system/backup/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backup_dir: customDir }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          backupReminderDismissed = false;
+          showBackupStatusMsg(`✅ ${data.message}`);
+          if (fromBanner) alert(data.message);
+          loadBackupStatus();
+        } else {
+          showBackupStatusMsg(`❌ ${data.message}`, true);
+          if (fromBanner) alert(data.message);
+        }
+      } catch (e) {
+        const msg = '執行備份失敗：' + e.message;
+        showBackupStatusMsg(`❌ ${msg}`, true);
+        if (fromBanner) alert(msg);
+      } finally {
+        if (btnSettings) { btnSettings.disabled = false; btnSettings.textContent = '⚡ 立即備份資料庫'; }
+        if (btnBanner) { btnBanner.disabled = false; btnBanner.textContent = '💾 立即備份'; }
+      }
+    }
+
+    async function deleteBackupFile(filename) {
+      if (!confirm(`確定要刪除備份檔「${filename}」嗎？此動作無法復原。`)) return;
+      try {
+        const res = await fetch(`/api/system/backup/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          showBackupStatusMsg(`✅ ${data.message}`);
+          loadBackupStatus();
+        } else {
+          showBackupStatusMsg(`❌ ${data.message}`, true);
+        }
+      } catch (e) {
+        showBackupStatusMsg('刪除備份檔失敗：' + e.message, true);
+      }
+    }
+
+    async function restoreBackupFile(filename) {
+      const warning = [
+        `確定要從備份檔「${filename}」還原資料庫嗎？`,
+        '',
+        '⚠️ 重要說明：',
+        '1. 目前的書籍、讀者、借閱紀錄與身分別資料將被覆蓋為該備份當時的資料。',
+        '2. 【管理員帳號與密碼會保留目前最新版本】，不會還原成舊備份中的帳號密碼。',
+        '3. 還原前系統會自動先備份目前資料庫（library_before_restore_*.db）以策安全。',
+        '4. 若該備份為舊版本格式，還原後系統會自動升級資料表結構。',
+      ].join('\n');
+      if (!confirm(warning)) return;
+
+      showBackupStatusMsg(`⏳ 正在驗證並從 ${filename} 還原資料庫，請耐心等待，切勿關閉視窗...`, false, true);
+      try {
+        const res = await fetch('/api/system/backup/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showBackupStatusMsg(`✅ ${data.message}`);
+          alert(data.message + '\n\n點擊確定後將自動重新載入頁面。');
+          window.location.reload();
+        } else {
+          showBackupStatusMsg(`❌ ${data.message}`, true);
+          alert(data.message);
+        }
+      } catch (e) {
+        const msg = '還原資料庫失敗：' + e.message;
+        showBackupStatusMsg(`❌ ${msg}`, true);
+        alert(msg);
+      }
+    }
+
+    async function uploadRestoreDbFile(input) {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const warning = [
+        `確定要從本機檔案「${file.name}」還原資料庫嗎？`,
+        '',
+        '⚠️ 重要說明：',
+        '1. 目前的書籍、讀者、借閱紀錄與身分別資料將被覆蓋為該備份當時的資料。',
+        '2. 【管理員帳號與密碼會保留目前最新版本】，不會還原成舊備份中的帳號密碼。',
+        '3. 還原前系統會自動先備份目前資料庫（library_before_restore_*.db）以策安全。',
+        '4. 若該備份為舊版本格式，還原後系統會自動升級資料表結構。',
+      ].join('\n');
+      if (!confirm(warning)) {
+        input.value = '';
+        return;
+      }
+
+      showBackupStatusMsg(`⏳ 正在上傳並還原 ${file.name}，請耐心等待，切勿關閉視窗...`, false, true);
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res = await fetch('/api/system/backup/restore-upload', {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await res.json();
+        if (data.success) {
+          showBackupStatusMsg(`✅ ${data.message}`);
+          alert(data.message + '\n\n點擊確定後將自動重新載入頁面。');
+          window.location.reload();
+        } else {
+          showBackupStatusMsg(`❌ ${data.message}`, true);
+          alert(data.message);
+        }
+      } catch (e) {
+        const msg = '上傳還原失敗：' + e.message;
+        showBackupStatusMsg(`❌ ${msg}`, true);
+        alert(msg);
+      } finally {
+        input.value = '';
+      }
+    }
+
     // 初始化載入
     window.addEventListener('DOMContentLoaded', () => {
       checkAuthStatus();
       checkForUpdates();
+      loadBackupStatus();
+      setInterval(loadBackupStatus, 30 * 60 * 1000);
     });
   </script>
 </body>

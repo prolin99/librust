@@ -245,12 +245,7 @@ fn run_migrations(conn: &mut Connection, path: &Path, existed_with_data: bool) -
     Ok(())
 }
 
-pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
-    let path_ref = path.as_ref();
-    let existed_with_data = path_ref.exists()
-        && std::fs::metadata(path_ref).map(|m| m.len() > 0).unwrap_or(false);
-
-    let mut conn = Connection::open(path_ref)?;
+fn init_core_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         PRAGMA foreign_keys = ON;
@@ -327,7 +322,16 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
             created_at TEXT NOT NULL
         );
         "
-    )?;
+    )
+}
+
+pub fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
+    let path_ref = path.as_ref();
+    let existed_with_data = path_ref.exists()
+        && std::fs::metadata(path_ref).map(|m| m.len() > 0).unwrap_or(false);
+
+    let mut conn = Connection::open(path_ref)?;
+    init_core_tables(&conn)?;
 
     // 自動檢查並升級舊資料庫結構（新增缺少欄位、索引與版本化遷移）
     run_migrations(&mut conn, path_ref, existed_with_data)?;
@@ -1835,6 +1839,326 @@ pub fn save_setting(db: &DbPool, key: &str, value: &str) -> std::result::Result<
     Ok(())
 }
 
+// === 資料庫備份與還原 ===
+
+pub const BACKUP_MAX_KEEP: usize = 10;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupFileInfo {
+    pub filename: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub is_pre_restore: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupResult {
+    pub filename: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub created_at: String,
+    pub pruned_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RestoreResult {
+    pub pre_restore_backup: String,
+    pub restored_from: String,
+    pub migrated_from_version: i32,
+    pub current_schema_version: i32,
+}
+
+/// 產生單一完整的 SQLite 備份檔（透過 VACUUM INTO，避免 WAL 遺漏交易）
+pub fn create_database_backup(
+    db: &DbPool,
+    backup_dir: &Path,
+    prefix: &str,
+    enforce_retention: bool,
+) -> std::result::Result<BackupResult, String> {
+    std::fs::create_dir_all(backup_dir)
+        .map_err(|e| format!("無法建立備份目錄 {}: {}", backup_dir.display(), e))?;
+
+    let now = Local::now();
+    let base_name = format!("{}_{}.db", prefix, now.format("%Y%m%d_%H%M%S"));
+    let mut target_path = backup_dir.join(&base_name);
+    if target_path.exists() {
+        let unique_name = format!("{}_{}_{}.db", prefix, now.format("%Y%m%d_%H%M%S"), now.timestamp_subsec_millis());
+        target_path = backup_dir.join(unique_name);
+    }
+
+    let filename = target_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or(base_name);
+
+    {
+        let conn = db.lock().unwrap();
+        let target_str = target_path.to_string_lossy().to_string();
+        conn.execute("VACUUM INTO ?1", params![target_str])
+            .map_err(|e| format!("建立備份檔失敗: {}", e))?;
+        if enforce_retention {
+            let iso_now = now.to_rfc3339();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_at', ?1)",
+                params![iso_now],
+            );
+        }
+    }
+
+    let size_bytes = std::fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
+
+    // 自動保留最新 BACKUP_MAX_KEEP (10) 份常規備份，超過則刪除最舊者
+    let mut pruned_count = 0usize;
+    if enforce_retention {
+        let mut regular_backups: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(backup_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.starts_with("library_backup_") && fname.ends_with(".db") {
+                    Some((fname, entry.path()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // 檔名含 YYYYMMDD_HHMMSS，降冪排序即由新到舊
+        regular_backups.sort_by(|a, b| b.0.cmp(&a.0));
+        if regular_backups.len() > BACKUP_MAX_KEEP {
+            for (_, old_path) in regular_backups.into_iter().skip(BACKUP_MAX_KEEP) {
+                if std::fs::remove_file(&old_path).is_ok() {
+                    pruned_count += 1;
+                }
+            }
+        }
+    }
+
+    Ok(BackupResult {
+        filename,
+        path: target_path.to_string_lossy().to_string(),
+        size_bytes,
+        created_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        pruned_count,
+    })
+}
+
+/// 列出備份目錄中的所有 .db 備份檔（由新到舊排序）
+pub fn list_backup_files(backup_dir: &Path) -> Vec<BackupFileInfo> {
+    let Ok(entries) = std::fs::read_dir(backup_dir) else {
+        return vec![];
+    };
+
+    let mut list: Vec<(std::time::SystemTime, BackupFileInfo)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let lower = filename.to_ascii_lowercase();
+            if !lower.ends_with(".db") && !lower.contains(".db.bak_") {
+                return None;
+            }
+            let meta = entry.metadata().ok()?;
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let dt: chrono::DateTime<Local> = mtime.into();
+            let is_pre_restore = filename.starts_with("library_before_restore_");
+            Some((
+                mtime,
+                BackupFileInfo {
+                    filename,
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes: meta.len(),
+                    modified_at: dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    is_pre_restore,
+                },
+            ))
+        })
+        .collect();
+
+    list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.filename.cmp(&a.1.filename)));
+    list.into_iter().map(|(_, info)| info).collect()
+}
+
+/// 驗證指定檔案是否為完整合法的圖書系統 SQLite 備份檔，並回傳其 schema user_version
+pub fn validate_sqlite_backup_file(path: &Path) -> std::result::Result<i32, String> {
+    if !path.exists() || !path.is_file() {
+        return Err("找不到指定的備份檔案".to_string());
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let conn = Connection::open_with_flags(path, flags)
+        .map_err(|e| format!("無法開啟備份檔（非有效的 SQLite 資料庫）: {}", e))?;
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|e| format!("資料庫完整性檢查失敗: {}", e))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(format!("備份資料庫已損毀：{}", integrity));
+    }
+
+    for required_table in &["roles", "readers", "books", "loans"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![required_table],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
+            return Err(format!("此檔案缺少核心資料表 `{}`，非本系統有效備份檔！", required_table));
+        }
+    }
+
+    let ver: i32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    Ok(ver)
+}
+
+/// 安全還原舊備份資料庫：
+/// 1. 驗證備份檔完整性
+/// 2. 還原前自動建立目前資料庫快照（library_before_restore_*.db）
+/// 3. 保留目前最新的管理員帳號密碼（users）與登入工作階段（sessions），以及備份相關設定
+/// 4. 還原後自動執行 init_core_tables + run_migrations，確保舊版本資料表格式自動升級至最新版
+pub fn restore_database_from_file(
+    db: &DbPool,
+    db_path: &Path,
+    source_backup: &Path,
+    backup_dir: &Path,
+) -> std::result::Result<RestoreResult, String> {
+    // 1. 驗證來源備份檔
+    let source_ver = validate_sqlite_backup_file(source_backup)?;
+
+    // 2. 還原前先建立目前資料庫的安全快照
+    let pre_snapshot = create_database_backup(db, backup_dir, "library_before_restore", false)?;
+
+    let restored_from = source_backup
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| source_backup.to_string_lossy().to_string());
+
+    // 3. 在互斥鎖保護下安全切換連線並覆寫主資料庫
+    let mut conn_guard = db.lock().unwrap();
+
+    // 3a. 讀取目前最新的管理員帳號密碼與登入工作階段，以及備份相關設定
+    let preserved_users: Vec<(String, String, String)> = {
+        let mut stmt = conn_guard
+            .prepare("SELECT username, password_hash, created_at FROM users")
+            .map_err(|e| format!("讀取目前帳號資料失敗: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| format!("讀取目前帳號資料失敗: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows
+    };
+
+    let preserved_sessions: Vec<(String, String, String)> = {
+        let mut stmt = conn_guard
+            .prepare("SELECT token, username, created_at FROM sessions")
+            .map_err(|e| format!("讀取目前工作階段失敗: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| format!("讀取目前工作階段失敗: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows
+    };
+
+    let mut preserved_settings: Vec<(String, String)> = Vec::new();
+    for key in &["backup_dir", "backup_reminder_cycle", "last_backup_at"] {
+        if let Ok(val) = conn_guard.query_row::<String, _, _>(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        ) {
+            preserved_settings.push(((*key).to_string(), val));
+        }
+    }
+
+    // 3b. 將 WAL 刷寫回主檔，並暫時切換為記憶體連線以釋放 Windows 檔案鎖定
+    let _ = conn_guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    let mem_conn = Connection::open_in_memory()
+        .map_err(|e| format!("無法建立暫存連線: {}", e))?;
+    let old_conn = std::mem::replace(&mut *conn_guard, mem_conn);
+    drop(old_conn);
+
+    // 移除舊的 WAL / SHM 檔案，避免與還原後的主檔混淆
+    let mut wal_os = db_path.as_os_str().to_os_string();
+    wal_os.push("-wal");
+    let mut shm_os = db_path.as_os_str().to_os_string();
+    shm_os.push("-shm");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(wal_os));
+    let _ = std::fs::remove_file(std::path::PathBuf::from(shm_os));
+
+    // 3c. 複製備份檔覆蓋 library.db（若失敗則嘗試重新開啟原資料庫）
+    if let Err(e) = std::fs::copy(source_backup, db_path) {
+        if let Ok(reopened) = Connection::open(db_path) {
+            *conn_guard = reopened;
+        }
+        return Err(format!("複製備份檔覆蓋資料庫失敗: {}", e));
+    }
+
+    // 3d. 重新開啟還原後的資料庫並執行結構自檢與版本化自動升級（確保舊版備份格式相容）
+    let mut new_conn = Connection::open(db_path)
+        .map_err(|e| format!("重新開啟還原後資料庫失敗: {}", e))?;
+    init_core_tables(&new_conn)
+        .map_err(|e| format!("初始化還原後資料表結構失敗: {}", e))?;
+    run_migrations(&mut new_conn, db_path, false)
+        .map_err(|e| format!("自動升級還原後資料庫格式失敗: {}", e))?;
+
+    // 3e. 寫回保留的最新管理員帳號密碼、登入工作階段與備份設定
+    {
+        let tx = new_conn
+            .transaction()
+            .map_err(|e| format!("啟動帳號保留交易失敗: {}", e))?;
+        if !preserved_users.is_empty() {
+            tx.execute("DELETE FROM users", [])
+                .map_err(|e| format!("更新帳號資料表失敗: {}", e))?;
+            for (u, hash, created_at) in &preserved_users {
+                tx.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+                    params![u, hash, created_at],
+                )
+                .map_err(|e| format!("還原保留帳號失敗: {}", e))?;
+            }
+        }
+        if !preserved_sessions.is_empty() {
+            tx.execute("DELETE FROM sessions", [])
+                .map_err(|e| format!("更新工作階段失敗: {}", e))?;
+            for (tok, u, created_at) in &preserved_sessions {
+                tx.execute(
+                    "INSERT INTO sessions (token, username, created_at) VALUES (?1, ?2, ?3)",
+                    params![tok, u, created_at],
+                )
+                .map_err(|e| format!("還原保留工作階段失敗: {}", e))?;
+            }
+        }
+        for (k, v) in &preserved_settings {
+            let _ = tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                params![k, v],
+            );
+        }
+        tx.commit()
+            .map_err(|e| format!("提交帳號保留交易失敗: {}", e))?;
+    }
+
+    *conn_guard = new_conn;
+
+    Ok(RestoreResult {
+        pre_restore_backup: pre_snapshot.filename,
+        restored_from,
+        migrated_from_version: source_ver,
+        current_schema_version: CURRENT_SCHEMA_VERSION,
+    })
+}
+
 // === 帳號密碼認證與工作階段 (安全 bcrypt 加密) ===
 
 pub fn verify_user_login(db: &DbPool, username: &str, password: &str) -> std::result::Result<bool, String> {
@@ -2292,6 +2616,100 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".bak_v"))
             .collect();
         assert_eq!(backups_after.len(), 1, "已升級資料庫重新開啟時不應重複備份");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_backup_retention_and_restore_preserves_password_and_migrates() {
+        let temp_dir = std::env::temp_dir().join(format!("test_backup_restore_{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("library.db");
+        let backup_dir = temp_dir.join("backups");
+
+        let pool = init_db(&db_path).unwrap();
+
+        // 1. 建立初始書籍 B001，並建立第一份備份
+        let b1 = Book {
+            id: "B001".to_string(),
+            title: "原始書籍".to_string(),
+            author: "".to_string(),
+            publisher: "".to_string(),
+            pub_year: "".to_string(),
+            isbn: "".to_string(),
+            category: "100".to_string(),
+            location: "".to_string(),
+            price: 100.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            current_borrower: None,
+        };
+        create_book(&pool, b1).unwrap();
+        let first_backup = create_database_backup(&pool, &backup_dir, "library_backup", true).unwrap();
+        assert!(std::path::Path::new(&first_backup.path).exists());
+
+        // 2. 測試自動保留 10 份：先放入 11 個舊檔名模擬，再建立新備份，應只保留 10 份
+        for i in 1..=11 {
+            let fake_path = backup_dir.join(format!("library_backup_20250101_0000{:02}.db", i));
+            std::fs::copy(&first_backup.path, &fake_path).unwrap();
+        }
+        let pruned_res = create_database_backup(&pool, &backup_dir, "library_backup", true).unwrap();
+        assert!(pruned_res.pruned_count >= 2);
+        let regular_count = list_backup_files(&backup_dir)
+            .into_iter()
+            .filter(|f| f.filename.starts_with("library_backup_"))
+            .count();
+        assert_eq!(regular_count, BACKUP_MAX_KEEP);
+
+        // 3. 修改管理員密碼為新密碼，並新增第二本書 B002
+        update_user_password(&pool, "admin", "admin", "new_secret_123").unwrap();
+        let session_tok = "test_session_tok_123";
+        create_session(&pool, session_tok, "admin").unwrap();
+        let b2 = Book {
+            id: "B002".to_string(),
+            title: "後來新增的書".to_string(),
+            author: "".to_string(),
+            publisher: "".to_string(),
+            pub_year: "".to_string(),
+            isbn: "".to_string(),
+            category: "200".to_string(),
+            location: "".to_string(),
+            price: 200.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            current_borrower: None,
+        };
+        create_book(&pool, b2).unwrap();
+        assert!(get_book_by_id(&pool, "B002").unwrap().is_some());
+
+        // 4. 還原回第一份備份（當時只有 B001、且密碼還是舊的 admin）
+        let restore_res = restore_database_from_file(
+            &pool,
+            &db_path,
+            std::path::Path::new(&first_backup.path),
+            &backup_dir,
+        )
+        .unwrap();
+        assert!(restore_res.pre_restore_backup.starts_with("library_before_restore_"));
+
+        // 驗證資料已還原（B001 存在，B002 不存在）
+        assert!(get_book_by_id(&pool, "B001").unwrap().is_some());
+        assert!(get_book_by_id(&pool, "B002").unwrap().is_none());
+
+        // 驗證管理員密碼與登入工作階段皆保留最新版本！
+        assert!(verify_user_login(&pool, "admin", "new_secret_123").unwrap());
+        assert!(!verify_user_login(&pool, "admin", "admin").unwrap());
+        assert_eq!(validate_session(&pool, session_tok).as_deref(), Some("admin"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
