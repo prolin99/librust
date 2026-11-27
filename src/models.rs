@@ -11,6 +11,16 @@ pub struct Role {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookCategory {
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub sort_order: i32,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reader {
     pub id: String,
     pub name: String,

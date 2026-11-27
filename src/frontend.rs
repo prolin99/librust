@@ -322,16 +322,20 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
     <section id="tab-books" class="tab-content">
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;">
-          <div style="display: flex; gap: 0.5rem; flex: 1; max-width: 500px;">
-            <input type="text" id="books-search" placeholder="搜尋書名、條碼、作者、ISBN、分類..." onkeydown="if(event.key==='Enter') loadBooks()">
-            <select id="books-status-filter" style="width: 130px;" onchange="loadBooks()">
+          <div style="display: flex; gap: 0.5rem; flex: 1; min-width: 320px; max-width: 680px; flex-wrap: wrap;">
+            <input type="text" id="books-search" placeholder="搜尋書名、條碼、作者、ISBN、分類..." style="flex: 1; min-width: 180px;" onkeydown="if(event.key==='Enter') loadBooks()">
+            <select id="books-status-filter" style="width: 125px;" onchange="loadBooks()">
               <option value="">全部狀態</option>
               <option value="available">在館可借</option>
               <option value="borrowed">借出中</option>
             </select>
+            <select id="books-category-filter" style="width: 165px;" onchange="loadBooks()">
+              <option value="">全部分類</option>
+            </select>
             <button class="btn btn-primary" onclick="loadBooks()">搜尋</button>
           </div>
-          <div style="display: flex; gap: 0.5rem;">
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button class="btn btn-outline" onclick="openCategoryManagerModal()">🏷️ 管理大分類</button>
             <button class="btn btn-outline" onclick="document.getElementById('import-books-input').click()">📥 匯入 Excel/CSV</button>
             <input type="file" id="import-books-input" style="display: none;" accept=".xlsx,.xls,.csv" onchange="uploadBooksFile(this)">
             <a href="/api/templates/books.csv" class="btn btn-outline" download>📄 下載範本</a>
@@ -899,7 +903,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
 
         <h3 style="margin-bottom: 0.5rem;">🚀 系統版本與線上自動更新</h3>
         <p id="settings-update-info" style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.85rem;">
-          目前版本：<code>v0.11</code>（正在檢查 GitHub Releases 是否有新版...）
+          目前版本：<code>v0.12</code>（正在檢查 GitHub Releases 是否有新版...）
         </p>
         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
           <button type="button" class="btn btn-outline" onclick="checkForUpdates(true)">🔍 檢查新版</button>
@@ -930,7 +934,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
         <span style="font-weight: 600; color: #f8fafc;">📚 現代化圖書管理借還系統</span>
         <span style="color: #475569;">|</span>
-        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.11</code></span>
+        <span>版本：<code style="background: #0f172a; padding: 0.15rem 0.4rem; border-radius: 0.25rem; color: #38bdf8;">0.12</code></span>
         <span style="color: #475569;">|</span>
         <a id="github-releases-link" href="https://github.com/prolin99/librust/releases" target="_blank" rel="noopener noreferrer" title="前往 GitHub Releases 下載頁面" style="display: inline-flex; align-items: center; gap: 0.35rem; color: #38bdf8; text-decoration: none; font-weight: 500;">
           <svg height="17" width="17" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;">
@@ -997,15 +1001,21 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <input type="text" id="bm-publisher">
         </div>
       </div>
-      <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+      <div style="display: flex; gap: 0.5rem; margin-bottom: 0.35rem;">
         <div style="flex: 1;">
-          <label style="font-size: 0.85rem; font-weight: 600;">分類號</label>
-          <input type="text" id="bm-category">
+          <label style="font-size: 0.85rem; font-weight: 600; display: flex; justify-content: space-between; align-items: center;">
+            <span>分類號</span>
+            <span id="bm-category-hint" style="font-size: 0.78rem; font-weight: 600; color: var(--primary);"></span>
+          </label>
+          <input type="text" id="bm-category" placeholder="例：300. 或 801" oninput="updateBookModalCategoryHint()">
         </div>
         <div style="flex: 1;">
           <label style="font-size: 0.85rem; font-weight: 600;">存放位置/櫃號</label>
           <input type="text" id="bm-location">
         </div>
+      </div>
+      <div id="bm-category-legend" style="font-size: 0.76rem; color: var(--text-muted); background: #f8fafc; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.4rem 0.6rem; margin-bottom: 0.75rem; line-height: 1.5;">
+        大分類對照：載入中...
       </div>
       <div style="margin-bottom: 0.75rem;">
         <label style="font-size: 0.85rem; font-weight: 600;">書籍簡介 (Description)</label>
@@ -1016,6 +1026,58 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem;">
         <button class="btn btn-outline" onclick="closeModal('book-modal')">取消</button>
         <button class="btn btn-primary" onclick="saveBookFromModal()">儲存書籍</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 書籍大分類管理 Modal -->
+  <div id="category-modal" class="modal-overlay">
+    <div class="modal" style="max-width: 680px; width: 95%;">
+      <div class="modal-header">
+        <h3>🏷️ 書籍大分類代碼管理</h3>
+        <button class="btn btn-outline btn-sm" onclick="closeModal('category-modal')">✕</button>
+      </div>
+      <p style="font-size: 0.83rem; color: var(--text-muted); margin-bottom: 0.85rem;">
+        系統會依據書籍分類號的<strong>開頭字元（前綴，不分大小寫）</strong>自動歸類，例如分類號 <code>300</code>、<code>300.</code>、<code>310.</code> 皆歸屬代碼 <code>3</code>。可自由修改名稱或新增自訂代碼（如 <code>A</code> 外國）。
+      </p>
+      <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; background: #f8fafc; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.75rem; margin-bottom: 0.85rem;">
+        <div style="width: 90px;">
+          <label style="font-size: 0.8rem; font-weight: 600; display: block;">代碼 *</label>
+          <input type="text" id="cat-m-code" placeholder="例: 3 或 A" style="text-transform: uppercase;">
+        </div>
+        <div style="flex: 1; min-width: 140px;">
+          <label style="font-size: 0.8rem; font-weight: 600; display: block;">分類名稱 *</label>
+          <input type="text" id="cat-m-name" placeholder="例: 自然科學 / 外國">
+        </div>
+        <div style="width: 80px;">
+          <label style="font-size: 0.8rem; font-weight: 600; display: block;">排序</label>
+          <input type="number" id="cat-m-order" value="10">
+        </div>
+        <div style="flex: 1; min-width: 120px;">
+          <label style="font-size: 0.8rem; font-weight: 600; display: block;">備註</label>
+          <input type="text" id="cat-m-note" placeholder="選填">
+        </div>
+        <div style="display: flex; gap: 0.35rem;">
+          <button type="button" class="btn btn-primary btn-sm" onclick="saveCategoryFromModal()">儲存</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="resetCategoryForm()">清空</button>
+        </div>
+      </div>
+      <div class="table-container" style="max-height: 320px; overflow-y: auto;">
+        <table id="categories-manage-table">
+          <thead>
+            <tr>
+              <th style="width: 75px;">代碼</th>
+              <th>分類名稱</th>
+              <th style="width: 65px;">排序</th>
+              <th>備註</th>
+              <th style="width: 125px;">操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div style="display: flex; justify-content: flex-end; margin-top: 1rem;">
+        <button class="btn btn-outline" onclick="closeModal('category-modal')">關閉</button>
       </div>
     </div>
   </div>
@@ -1608,15 +1670,198 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       }
     }
 
-    // === 3. 書籍管理 (含多筆分頁功能) ===
+    // === 3. 書籍管理 (含多筆分頁與大分類管理) ===
+    let categoriesCache = [];
     let booksAllList = [];
     let booksCurrentPage = 1;
     let booksPageSize = 20;
 
+    function resolveCategoryMatch(rawCategory) {
+      const normalized = (rawCategory || '').trim().toUpperCase();
+      if (!normalized || categoriesCache.length === 0) return null;
+      let best = null;
+      for (const c of categoriesCache) {
+        const code = (c.code || '').trim().toUpperCase();
+        if (code && normalized.startsWith(code)) {
+          if (!best || code.length > (best.code || '').trim().length) {
+            best = c;
+          }
+        }
+      }
+      return best;
+    }
+
+    function formatBookCategoryCell(rawCategory) {
+      const trimmed = (rawCategory || '').trim();
+      if (!trimmed) return '-';
+      const match = resolveCategoryMatch(trimmed);
+      if (match) {
+        return `<code>${escapeHtml(trimmed)}</code> <span class="badge badge-info">${escapeHtml(match.name)}</span>`;
+      }
+      return `<code>${escapeHtml(trimmed)}</code>`;
+    }
+
+    function updateCategoryLegendAndFilter() {
+      const sel = document.getElementById('books-category-filter');
+      if (sel) {
+        const prev = sel.value;
+        const opts = ['<option value="">全部分類</option>'];
+        categoriesCache.forEach(c => {
+          opts.push(`<option value="${escapeHtml(c.code)}">${escapeHtml(c.code)} - ${escapeHtml(c.name)}</option>`);
+        });
+        opts.push('<option value="__EMPTY__">未分類（空白）</option>');
+        opts.push('<option value="__OTHER__">其他（未定義代碼）</option>');
+        sel.innerHTML = opts.join('');
+        if ([...sel.options].some(o => o.value === prev)) {
+          sel.value = prev;
+        }
+      }
+
+      const legend = document.getElementById('bm-category-legend');
+      if (legend) {
+        if (categoriesCache.length === 0) {
+          legend.textContent = '大分類對照：尚未設定大分類代碼';
+        } else {
+          const items = categoriesCache.map(c => `<strong>${escapeHtml(c.code)}</strong> ${escapeHtml(c.name)}`).join(' ｜ ');
+          legend.innerHTML = `大分類對照：${items}`;
+        }
+      }
+      updateBookModalCategoryHint();
+    }
+
+    function updateBookModalCategoryHint() {
+      const input = document.getElementById('bm-category');
+      const hint = document.getElementById('bm-category-hint');
+      if (!input || !hint) return;
+      const val = input.value.trim();
+      if (!val) {
+        hint.textContent = '';
+        return;
+      }
+      const match = resolveCategoryMatch(val);
+      if (match) {
+        hint.style.color = 'var(--primary)';
+        hint.textContent = `→ ${match.code} ${match.name}`;
+      } else {
+        hint.style.color = 'var(--text-muted)';
+        hint.textContent = '→ 未定義大分類';
+      }
+    }
+
+    async function loadCategories() {
+      try {
+        const res = await fetch('/api/categories');
+        const data = await res.json();
+        if (data.success && data.data) {
+          categoriesCache = data.data;
+          updateCategoryLegendAndFilter();
+          renderCategoriesManageTable();
+        }
+      } catch (e) {
+        console.error('載入大分類失敗:', e);
+      }
+    }
+
+    function renderCategoriesManageTable() {
+      const tbody = document.querySelector('#categories-manage-table tbody');
+      if (!tbody) return;
+      if (categoriesCache.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.25rem;">尚無大分類設定</td></tr>';
+        return;
+      }
+      tbody.innerHTML = categoriesCache.map(c => {
+        const jsCat = JSON.stringify(c);
+        const jsCode = JSON.stringify(c.code);
+        return `
+          <tr>
+            <td><code><strong>${escapeHtml(c.code)}</strong></code></td>
+            <td>${escapeHtml(c.name)}</td>
+            <td>${c.sort_order}</td>
+            <td style="font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(c.note || '-')}</td>
+            <td style="white-space: nowrap;">
+              <button type="button" class="btn btn-outline btn-sm" onclick='editCategoryForm(${jsCat})'>編輯</button>
+              <button type="button" class="btn btn-outline btn-sm" style="color: var(--danger); border-color: var(--danger);" onclick='deleteCategoryItem(${jsCode})'>刪除</button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function openCategoryManagerModal() {
+      await loadCategories();
+      resetCategoryForm();
+      openModal('category-modal');
+    }
+
+    function editCategoryForm(cat) {
+      const codeInput = document.getElementById('cat-m-code');
+      if (codeInput) {
+        codeInput.value = cat.code;
+        codeInput.readOnly = true;
+      }
+      document.getElementById('cat-m-name').value = cat.name || '';
+      document.getElementById('cat-m-order').value = cat.sort_order ?? 0;
+      document.getElementById('cat-m-note').value = cat.note || '';
+    }
+
+    function resetCategoryForm() {
+      const codeInput = document.getElementById('cat-m-code');
+      if (codeInput) {
+        codeInput.value = '';
+        codeInput.readOnly = false;
+      }
+      const nameInput = document.getElementById('cat-m-name');
+      if (nameInput) nameInput.value = '';
+      const orderInput = document.getElementById('cat-m-order');
+      if (orderInput) orderInput.value = categoriesCache.length;
+      const noteInput = document.getElementById('cat-m-note');
+      if (noteInput) noteInput.value = '';
+    }
+
+    async function saveCategoryFromModal() {
+      const code = document.getElementById('cat-m-code').value.trim().toUpperCase();
+      const name = document.getElementById('cat-m-name').value.trim();
+      const sortOrder = parseInt(document.getElementById('cat-m-order').value, 10) || 0;
+      const note = document.getElementById('cat-m-note').value.trim();
+      if (!code || !name) {
+        alert('請填寫分類代碼與分類名稱！');
+        return;
+      }
+      const res = await fetch('/api/categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, name, sort_order: sortOrder, note }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await loadCategories();
+        resetCategoryForm();
+        renderBooksTable();
+      } else {
+        alert(data.message || '儲存大分類失敗');
+      }
+    }
+
+    async function deleteCategoryItem(code) {
+      if (!confirm(`確定要刪除大分類代碼「${code}」嗎？（不會刪除既有書籍資料）`)) return;
+      const res = await fetch(`/api/categories/${encodeURIComponent(code)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        await loadCategories();
+        renderBooksTable();
+      } else {
+        alert(data.message || '刪除大分類失敗');
+      }
+    }
+
     async function loadBooks() {
+      if (categoriesCache.length === 0) {
+        await loadCategories();
+      }
       const q = document.getElementById('books-search').value.trim();
       const st = document.getElementById('books-status-filter').value;
-      const res = await fetch(`/api/books?q=${encodeURIComponent(q)}&status=${encodeURIComponent(st)}`);
+      const cat = document.getElementById('books-category-filter')?.value || '';
+      const res = await fetch(`/api/books?q=${encodeURIComponent(q)}&status=${encodeURIComponent(st)}&category=${encodeURIComponent(cat)}`);
       const data = await res.json();
       if (data.success && data.data) {
         booksAllList = data.data;
@@ -1747,7 +1992,7 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
           <td>${escapeHtml(book.author)}</td>
           <td>${escapeHtml(book.publisher)}</td>
           <td>${book.isbn || '-'}</td>
-          <td>${book.category || '-'}</td>
+          <td>${formatBookCategoryCell(book.category)}</td>
           <td>${book.location || '-'}</td>
           <td>${statusBadge}</td>
           <td>${book.borrow_count}</td>
@@ -1782,6 +2027,11 @@ pub const HTML_PAGE: &str = r##"<!DOCTYPE html>
       document.getElementById('bm-description').value = book ? book.description : '';
       document.getElementById('bm-cover-url').value = book ? book.cover_url : '';
       document.getElementById('bm-created-at').value = book ? book.created_at : '';
+      if (categoriesCache.length === 0) {
+        await loadCategories();
+      } else {
+        updateBookModalCategoryHint();
+      }
 
       // 重設來源標籤與翻譯按鈕
       const srcBar = document.getElementById('bm-isbn-source-bar');

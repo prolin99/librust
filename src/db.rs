@@ -8,7 +8,7 @@ use crate::legacy::{read_dbf, format_dbf_date};
 pub type DbPool = Arc<Mutex<Connection>>;
 
 /// 目前資料庫結構版本號；未來每當資料表或欄位有異動時遞增，並於 `run_migrations` 加入對應升級步驟
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 /// 檢查指定資料表是否已存在某欄位
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -72,6 +72,9 @@ fn ensure_all_expected_columns(conn: &Connection) -> Result<usize> {
         // users & sessions
         ("users", "created_at", "TEXT NOT NULL DEFAULT ''"),
         ("sessions", "created_at", "TEXT NOT NULL DEFAULT ''"),
+        // categories
+        ("categories", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
+        ("categories", "note", "TEXT NOT NULL DEFAULT ''"),
     ];
 
     let mut added = 0usize;
@@ -241,6 +244,50 @@ fn run_migrations(conn: &mut Connection, path: &Path, existed_with_data: bool) -
         current_ver = 3;
     }
 
+    if current_ver < 4 {
+        let tx = conn.transaction()?;
+        // v0.12 升級：建立書籍大分類資料表 categories 並預填中文圖書分類法 0~9 十大類
+        tx.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS categories (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT ''
+            );
+            "
+        )?;
+        let cat_count: i64 = tx.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap_or(0);
+        if cat_count == 0 {
+            let defaults: &[(&str, &str, i32)] = &[
+                ("0", "總類", 0),
+                ("1", "哲學", 1),
+                ("2", "宗教", 2),
+                ("3", "自然科學", 3),
+                ("4", "應用科學", 4),
+                ("5", "社會科學", 5),
+                ("6", "中國史地", 6),
+                ("7", "世界史地", 7),
+                ("8", "語文類", 8),
+                ("9", "藝術類", 9),
+            ];
+            for &(code, name, order) in defaults {
+                tx.execute(
+                    "INSERT OR IGNORE INTO categories (code, name, sort_order, note) VALUES (?1, ?2, ?3, '')",
+                    params![code, name, order],
+                )?;
+            }
+        }
+        let now = Local::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations (version, description, applied_at) VALUES (4, ?1, ?2)",
+            params!["v0.12 建立書籍大分類代碼表 (categories) 並預填 0~9 預設分類", now],
+        )?;
+        tx.pragma_update(None, "user_version", 4i32)?;
+        tx.commit()?;
+        current_ver = 4;
+    }
+
     let _ = current_ver;
     Ok(())
 }
@@ -320,6 +367,13 @@ fn init_core_tables(conn: &Connection) -> Result<()> {
             token TEXT PRIMARY KEY,
             username TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS categories (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT ''
         );
         "
     )
@@ -898,9 +952,79 @@ pub fn get_next_book_id(db: &DbPool) -> std::result::Result<String, String> {
     get_next_book_id_internal(&conn)
 }
 
+// === 書籍大分類操作 ===
+
+pub fn get_categories(db: &DbPool) -> Result<Vec<BookCategory>> {
+    let conn = db.lock().unwrap();
+    get_categories_internal(&conn)
+}
+
+fn get_categories_internal(conn: &Connection) -> Result<Vec<BookCategory>> {
+    let mut stmt = conn.prepare(
+        "SELECT code, name, sort_order, note FROM categories ORDER BY sort_order ASC, code ASC"
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(BookCategory {
+                code: row.get(0)?,
+                name: row.get(1)?,
+                sort_order: row.get(2)?,
+                note: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn upsert_category(db: &DbPool, cat: &BookCategory) -> std::result::Result<BookCategory, String> {
+    let code = cat.code.trim().to_uppercase();
+    let name = cat.name.trim().to_string();
+    if code.is_empty() || name.is_empty() {
+        return Err("分類代碼與分類名稱不可為空！".to_string());
+    }
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO categories (code, name, sort_order, note) VALUES (?1, ?2, ?3, ?4)",
+        params![code, name, cat.sort_order, cat.note.trim()],
+    )
+    .map_err(|e| format!("儲存大分類失敗: {}", e))?;
+
+    Ok(BookCategory {
+        code,
+        name,
+        sort_order: cat.sort_order,
+        note: cat.note.trim().to_string(),
+    })
+}
+
+pub fn delete_category(db: &DbPool, code: &str) -> std::result::Result<(), String> {
+    let normalized = code.trim().to_uppercase();
+    let conn = db.lock().unwrap();
+    conn.execute("DELETE FROM categories WHERE code = ?1", params![normalized])
+        .map_err(|e| format!("刪除大分類失敗: {}", e))?;
+    Ok(())
+}
+
+/// 依據大分類代碼表（採最長前綴優先、不分大小寫）判別書籍分類號所屬大分類代碼
+pub fn resolve_category_code<'a>(raw_category: &str, categories: &'a [BookCategory]) -> Option<&'a str> {
+    let normalized = raw_category.trim().to_uppercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    categories
+        .iter()
+        .filter(|c| {
+            let code = c.code.trim().to_uppercase();
+            !code.is_empty() && normalized.starts_with(&code)
+        })
+        .max_by_key(|c| c.code.trim().len())
+        .map(|c| c.code.as_str())
+}
+
 // === 書籍操作 ===
 
-pub fn get_books(db: &DbPool, query: &str, status_filter: &str) -> Result<Vec<Book>> {
+pub fn get_books(db: &DbPool, query: &str, status_filter: &str, category_filter: &str) -> Result<Vec<Book>> {
     let conn = db.lock().unwrap();
     let trimmed = query.trim();
     let status_cond = match status_filter {
@@ -1000,7 +1124,38 @@ pub fn get_books(db: &DbPool, query: &str, status_filter: &str) -> Result<Vec<Bo
         rows
     };
 
-    Ok(books)
+    let cat_filter = category_filter.trim();
+    if cat_filter.is_empty() {
+        return Ok(books);
+    }
+
+    let categories = get_categories_internal(&conn).unwrap_or_default();
+    let filtered: Vec<Book> = match cat_filter {
+        "__EMPTY__" => books
+            .into_iter()
+            .filter(|b| b.category.trim().is_empty())
+            .collect(),
+        "__OTHER__" => books
+            .into_iter()
+            .filter(|b| {
+                !b.category.trim().is_empty()
+                    && resolve_category_code(&b.category, &categories).is_none()
+            })
+            .collect(),
+        target_code => {
+            let target_upper = target_code.to_uppercase();
+            books
+                .into_iter()
+                .filter(|b| {
+                    resolve_category_code(&b.category, &categories)
+                        .map(|c| c.eq_ignore_ascii_case(&target_upper))
+                        .unwrap_or(false)
+                })
+                .collect()
+        }
+    };
+
+    Ok(filtered)
 }
 
 pub fn get_book_by_id(db: &DbPool, id: &str) -> Result<Option<Book>> {
@@ -1605,14 +1760,36 @@ pub fn get_stats(db: &DbPool) -> Result<StatsSummary> {
     ).unwrap_or(0);
     let total_history_loans: i64 = conn.query_row("SELECT COUNT(*) FROM loans", [], |r| r.get(0)).unwrap_or(0);
 
-    // 分類統計
-    let mut cat_stmt = conn.prepare("SELECT COALESCE(NULLIF(category, ''), '未分類') as cat, COUNT(*) FROM books GROUP BY cat ORDER BY COUNT(*) DESC LIMIT 8")?;
-    let category_distribution = cat_stmt.query_map([], |r| {
-        Ok(CategoryStat {
-            category: r.get(0)?,
-            count: r.get(1)?,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    // 分類統計（依大分類代碼表前綴歸類，未填為「未分類」、未定義代碼為「其他分類」）
+    let categories = get_categories_internal(&conn).unwrap_or_default();
+    let cat_name_map: std::collections::HashMap<&str, &str> = categories
+        .iter()
+        .map(|c| (c.code.as_str(), c.name.as_str()))
+        .collect();
+    let mut cat_stmt = conn.prepare("SELECT category, COUNT(*) FROM books GROUP BY category")?;
+    let mut aggregated: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let raw_groups: Vec<(String, i64)> = cat_stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (raw_cat, cnt) in raw_groups {
+        let label = if raw_cat.trim().is_empty() {
+            "未分類".to_string()
+        } else if let Some(code) = resolve_category_code(&raw_cat, &categories) {
+            let name = cat_name_map.get(code).copied().unwrap_or("");
+            format!("{} {}", code, name)
+        } else {
+            "其他分類".to_string()
+        };
+        *aggregated.entry(label).or_insert(0) += cnt;
+    }
+
+    let mut category_distribution: Vec<CategoryStat> = aggregated
+        .into_iter()
+        .map(|(category, count)| CategoryStat { category, count })
+        .collect();
+    category_distribution.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.category.cmp(&b.category)));
 
     // 熱門借閱排行 Top 8
     let mut top_stmt = conn.prepare("SELECT id, title, borrow_count FROM books ORDER BY borrow_count DESC LIMIT 8")?;
@@ -2710,6 +2887,81 @@ mod tests {
         assert!(verify_user_login(&pool, "admin", "new_secret_123").unwrap());
         assert!(!verify_user_login(&pool, "admin", "admin").unwrap());
         assert_eq!(validate_session(&pool, session_tok).as_deref(), Some("admin"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_book_categories_prefix_filter_and_custom_codes() {
+        let temp_dir = std::env::temp_dir().join(format!("test_categories_{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("library.db");
+        let pool = init_db(&db_path).unwrap();
+
+        // 預設應有 0~9 共 10 個大分類
+        let cats = get_categories(&pool).unwrap();
+        assert_eq!(cats.len(), 10);
+        assert_eq!(cats[3].code, "3");
+        assert_eq!(cats[3].name, "自然科學");
+
+        // 新增自訂大分類 A 外國
+        upsert_category(
+            &pool,
+            &BookCategory {
+                code: "a".to_string(),
+                name: "外國".to_string(),
+                sort_order: 10,
+                note: "外文書".to_string(),
+            },
+        )
+        .unwrap();
+
+        let make_book = |id: &str, cat: &str| Book {
+            id: id.to_string(),
+            title: format!("書 {}", id),
+            author: "".to_string(),
+            publisher: "".to_string(),
+            pub_year: "".to_string(),
+            isbn: "".to_string(),
+            category: cat.to_string(),
+            location: "".to_string(),
+            price: 0.0,
+            description: "".to_string(),
+            cover_url: "".to_string(),
+            status: "available".to_string(),
+            borrow_count: 0,
+            enrichment_status: "none".to_string(),
+            note: "".to_string(),
+            created_at: "".to_string(),
+            current_borrower: None,
+        };
+        create_book(&pool, make_book("B1", "300.")).unwrap();
+        create_book(&pool, make_book("B2", "310")).unwrap();
+        create_book(&pool, make_book("B3", "a105")).unwrap();
+        create_book(&pool, make_book("B4", "")).unwrap();
+        create_book(&pool, make_book("B5", "Z99")).unwrap();
+
+        let sci = get_books(&pool, "", "", "3").unwrap();
+        assert_eq!(sci.len(), 2);
+        let foreign = get_books(&pool, "", "", "A").unwrap();
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].id, "B3");
+        let empty = get_books(&pool, "", "", "__EMPTY__").unwrap();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].id, "B4");
+        let other = get_books(&pool, "", "", "__OTHER__").unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].id, "B5");
+
+        // 驗證統計儀表板的藏書分類分佈也依大分類歸類彙總
+        let stats = get_stats(&pool).unwrap();
+        assert!(stats.category_distribution.iter().any(|c| c.category == "3 自然科學" && c.count == 2));
+        assert!(stats.category_distribution.iter().any(|c| c.category == "A 外國" && c.count == 1));
+        assert!(stats.category_distribution.iter().any(|c| c.category == "未分類" && c.count == 1));
+        assert!(stats.category_distribution.iter().any(|c| c.category == "其他分類" && c.count == 1));
+
+        delete_category(&pool, "A").unwrap();
+        assert_eq!(get_categories(&pool).unwrap().len(), 10);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

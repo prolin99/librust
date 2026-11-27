@@ -14,7 +14,7 @@ use crate::models::*;
 use crate::importer::*;
 use crate::enricher::EnricherManager;
 
-pub const APP_VERSION: &str = "0.11";
+pub const APP_VERSION: &str = "0.12";
 pub const GITHUB_RELEASES_URL: &str = "https://github.com/prolin99/librust/releases";
 const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/prolin99/librust/releases/latest";
 const GITHUB_RELEASES_LIST_API: &str = "https://api.github.com/repos/prolin99/librust/releases?per_page=1";
@@ -34,6 +34,7 @@ pub struct AppState {
 pub struct SearchQuery {
     pub q: Option<String>,
     pub status: Option<String>,
+    pub category: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -91,6 +92,9 @@ pub fn create_router(state: AppState) -> Router {
         // 角色身分別
         .route("/api/roles", get(list_roles).post(create_or_update_role))
         .route("/api/roles/:id", delete(remove_role))
+        // 書籍大分類
+        .route("/api/categories", get(list_categories).post(create_or_update_category))
+        .route("/api/categories/:code", delete(remove_category))
         // 讀者
         .route("/api/readers", get(list_readers).post(create_reader_handler))
         .route("/api/readers/next-id", get(get_next_reader_id_handler))
@@ -182,6 +186,35 @@ async fn remove_role(
     }
 }
 
+// === 書籍大分類 ===
+
+async fn list_categories(State(state): State<AppState>) -> Json<ApiResponse<Vec<BookCategory>>> {
+    match get_categories(&state.db) {
+        Ok(cats) => Json(ApiResponse::ok("查詢成功", cats)),
+        Err(e) => Json(ApiResponse::err(format!("查詢大分類失敗: {}", e))),
+    }
+}
+
+async fn create_or_update_category(
+    State(state): State<AppState>,
+    Json(cat): Json<BookCategory>,
+) -> Json<ApiResponse<BookCategory>> {
+    match upsert_category(&state.db, &cat) {
+        Ok(saved) => Json(ApiResponse::ok("儲存大分類成功", saved)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+async fn remove_category(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Json<ApiResponse<String>> {
+    match delete_category(&state.db, &code) {
+        Ok(_) => Json(ApiResponse::ok("大分類已刪除", code)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
 // === 讀者 ===
 
 async fn list_readers(
@@ -261,7 +294,8 @@ async fn list_books(
 ) -> Json<ApiResponse<Vec<Book>>> {
     let q = query.q.unwrap_or_default();
     let status = query.status.unwrap_or_default();
-    match get_books(&state.db, &q, &status) {
+    let category = query.category.unwrap_or_default();
+    match get_books(&state.db, &q, &status, &category) {
         Ok(books) => Json(ApiResponse::ok("查詢成功", books)),
         Err(e) => Json(ApiResponse::err(format!("查詢書籍失敗: {}", e))),
     }
@@ -1504,7 +1538,7 @@ async fn export_readers_csv(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 async fn export_books_csv(State(state): State<AppState>) -> impl IntoResponse {
-    let books = match get_books(&state.db, "", "") {
+    let books = match get_books(&state.db, "", "", "") {
         Ok(b) => b,
         Err(_) => vec![],
     };
@@ -2031,9 +2065,9 @@ mod tests {
     use axum::body::to_bytes;
 
     #[tokio::test]
-    async fn test_ping_version_is_0_11() {
+    async fn test_ping_version_is_0_12() {
         let resp = handle_system_ping().await;
-        assert_eq!(resp.0.version, "0.11");
+        assert_eq!(resp.0.version, "0.12");
     }
 
     #[test]
